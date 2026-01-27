@@ -1,0 +1,9 @@
+SilkCast
+Copyright 2026 SilkCast contributors
+
+This product includes software developed by third parties:
+
+- OpenH264 video codec provided by Cisco Systems, Inc.
+  Source: https://github.com/cisco/openh264 (used optionally)
+  Binary license: http://www.openh264.org/BINARY_LICENSE.txt
+  Note: Cisco’s patent license applies to their distributed binaries; building from source may not include that patent grant.
