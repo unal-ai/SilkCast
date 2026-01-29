@@ -6,10 +6,11 @@ Built to be both a foundation and a drop-in endpoint, it scales from single USB 
 cmake -S . -B build
 cmake --build build
 ./build/silkcast
-# or: scripts/launch_desktop.sh   # double-click friendly, opens a demo stream
+# or: scripts/launch_desktop.sh   # double-click friendly, opens the demo UI
 ```
 Endpoints (early stub):
 - `GET /device/list`
+- `GET /device/{id}/caps` (V4L2 native formats, resolutions, and frame intervals; Linux only)
 - `GET /stream/live/{id}?codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
 - `GET /stream/live/{id}?codec=h264&container=mp4` (chunked fMP4: Baseline, IDR on join, tiny fragments)
 - `GET /stream/{id}/stats`
@@ -29,11 +30,13 @@ Endpoints (early stub):
 - `--codec <mjpeg|h264>` default codec when not specified (default `mjpeg`)
 
 ### Desktop launcher (demo)
-`scripts/launch_desktop.sh` builds, runs, then opens a demo stream for the first
-device. Override behavior with environment variables:
+`scripts/launch_desktop.sh` builds, runs, then opens the demo UI at `/`.
+Override behavior with environment variables:
+- `DEMO_MODE=stream` to open a stream directly.
 - `DEMO_MODE=list` to open `/device/list` instead.
 - `STREAM_DEVICE=video1` to pick a specific device.
 - `STREAM_CODEC=mjpeg` or `STREAM_PARAMS=codec=mjpeg&fps=15` to control stream.
+- `SKIP_BUILD=1` to skip rebuilds.
 
 ### Requirements
 - Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging. Non-Linux builds compile but camera capture stubs out.

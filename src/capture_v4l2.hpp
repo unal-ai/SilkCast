@@ -22,12 +22,13 @@ public:
   PixelFormat pixel_format() const { return pixel_format_; }
   int width() const { return params_.width; }
   int height() const { return params_.height; }
+  int fps() const { return params_.fps; }
 
 private:
   void loop();
   void loop_mmap();
   void loop_read();
-  bool configure_device(int fd, const CaptureParams &params);
+  bool configure_device(int fd, CaptureParams &params);
   void cleanup_mmap_setup_failure(int fd);
   void cleanup_mmap_buffers();
 
@@ -65,6 +66,7 @@ public:
   PixelFormat pixel_format() const { return pixel_format_; }
   int width() const { return params_.width; }
   int height() const { return params_.height; }
+  int fps() const { return params_.fps; }
   void handle_sample(void *sample_buffer);
 
 private:
@@ -87,5 +89,8 @@ public:
   bool running() const { return false; }
   bool latest_frame(std::string &) { return false; }
   PixelFormat pixel_format() const { return PixelFormat::UNKNOWN; }
+  int width() const { return 0; }
+  int height() const { return 0; }
+  int fps() const { return 0; }
 };
 #endif

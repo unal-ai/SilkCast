@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # Simple launcher intended to be double-clickable on desktop environments.
-# It builds (if needed) then starts SilkCast and opens the device list in a browser.
+# It builds, restarts SilkCast, and opens the demo UI in a browser.
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${REPO_DIR}/build"
 BIN="${BUILD_DIR}/silkcast"
 
-if [[ ! -x "${BIN}" ]]; then
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   mkdir -p "${BUILD_DIR}"
   cmake -S "${REPO_DIR}" -B "${BUILD_DIR}"
   cmake --build "${BUILD_DIR}"
@@ -17,19 +17,33 @@ fi
 PORT=${PORT:-8080}
 ADDR=${ADDR:-0.0.0.0}
 IDLE_TIMEOUT=${IDLE_TIMEOUT:-10}
-DEMO_MODE=${DEMO_MODE:-stream} # stream | list
+DEMO_MODE=${DEMO_MODE:-builder} # builder | stream | list
 STREAM_DEVICE=${STREAM_DEVICE:-}
 STREAM_CODEC=${STREAM_CODEC:-mjpeg}
 STREAM_PARAMS=${STREAM_PARAMS:-"codec=${STREAM_CODEC}"}
+
+if command -v pgrep >/dev/null 2>&1; then
+  EXISTING_PIDS="$(pgrep -f "${BIN}" || true)"
+  if [[ -z "${EXISTING_PIDS}" ]]; then
+    EXISTING_PIDS="$(pgrep -f "[s]ilkcast" || true)"
+  fi
+  if [[ -n "${EXISTING_PIDS}" ]]; then
+    echo "Stopping existing SilkCast (${EXISTING_PIDS})..."
+    kill ${EXISTING_PIDS} || true
+    sleep 0.5
+  fi
+fi
 
 echo "Starting SilkCast on ${ADDR}:${PORT} (idle-timeout ${IDLE_TIMEOUT}s)..."
 "${BIN}" --addr "${ADDR}" --port "${PORT}" --idle-timeout "${IDLE_TIMEOUT}" &
 PID=$!
 
 sleep 1
-URL="http://localhost:${PORT}/device/list"
+URL="http://localhost:${PORT}/"
 
-if [[ "${DEMO_MODE}" == "stream" ]]; then
+if [[ "${DEMO_MODE}" == "list" ]]; then
+  URL="http://localhost:${PORT}/device/list"
+elif [[ "${DEMO_MODE}" == "stream" ]]; then
   if [[ -z "${STREAM_DEVICE}" ]] && command -v curl >/dev/null 2>&1; then
     DEV_JSON="$(curl -sf "http://localhost:${PORT}/device/list" || true)"
     if [[ -n "${DEV_JSON}" ]]; then

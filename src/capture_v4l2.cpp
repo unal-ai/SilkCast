@@ -22,6 +22,27 @@ bool xioctl(int fd, unsigned long request, void *arg) {
   } while (r == -1 && errno == EINTR);
   return r != -1;
 }
+
+PixelFormat v4l2_to_pixel_format(__u32 fmt) {
+  switch (fmt) {
+  case V4L2_PIX_FMT_MJPEG:
+    return PixelFormat::MJPEG;
+  case V4L2_PIX_FMT_YUYV:
+    return PixelFormat::YUYV;
+  case V4L2_PIX_FMT_NV12:
+    return PixelFormat::NV12;
+  default:
+    return PixelFormat::UNKNOWN;
+  }
+}
+
+std::string fourcc_to_string(__u32 fmt) {
+  char fourcc[5] = {static_cast<char>(fmt & 0xFF),
+                    static_cast<char>((fmt >> 8) & 0xFF),
+                    static_cast<char>((fmt >> 16) & 0xFF),
+                    static_cast<char>((fmt >> 24) & 0xFF), 0};
+  return std::string(fourcc);
+}
 } // namespace
 
 CaptureV4L2::~CaptureV4L2() { stop(); }
@@ -55,7 +76,7 @@ void CaptureV4L2::cleanup_mmap_setup_failure(int fd) {
   xioctl(fd, VIDIOC_REQBUFS, &req);
 }
 
-bool CaptureV4L2::configure_device(int fd, const CaptureParams &params) {
+bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
   cleanup_mmap_buffers();
 
   v4l2_capability cap{};
@@ -82,8 +103,6 @@ bool CaptureV4L2::configure_device(int fd, const CaptureParams &params) {
   // Choose pixel format based on desired codec.
   __u32 pixfmt =
       params.codec == "h264" ? V4L2_PIX_FMT_YUYV : V4L2_PIX_FMT_MJPEG;
-  pixel_format_ =
-      params.codec == "h264" ? PixelFormat::YUYV : PixelFormat::MJPEG;
   std::cerr << "Setting format: " << params.width << "x" << params.height
             << " codec=" << params.codec << " pixfmt=0x" << std::hex << pixfmt
             << std::dec << "\n";
@@ -98,8 +117,27 @@ bool CaptureV4L2::configure_device(int fd, const CaptureParams &params) {
     std::cerr << "VIDIOC_S_FMT failed; errno=" << errno << "\n";
     return false;
   }
-  std::cerr << "Format set: " << fmt.fmt.pix.width << "x" << fmt.fmt.pix.height
-            << "\n";
+  params.width = static_cast<int>(fmt.fmt.pix.width);
+  params.height = static_cast<int>(fmt.fmt.pix.height);
+  pixel_format_ = v4l2_to_pixel_format(fmt.fmt.pix.pixelformat);
+  if (pixel_format_ == PixelFormat::UNKNOWN) {
+    std::cerr << "Unsupported pixel format negotiated: "
+              << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
+    return false;
+  }
+  if (params.codec == "mjpeg" && pixel_format_ != PixelFormat::MJPEG) {
+    std::cerr << "Device did not accept MJPEG, got "
+              << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
+    return false;
+  }
+  if (params.codec == "h264" && pixel_format_ != PixelFormat::YUYV &&
+      pixel_format_ != PixelFormat::NV12) {
+    std::cerr << "Device did not provide raw frames for H264, got "
+              << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
+    return false;
+  }
+  std::cerr << "Format set: " << params.width << "x" << params.height
+            << " fourcc=" << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
   frame_size_ = fmt.fmt.pix.sizeimage;
 
   // Set FPS if possible.
@@ -108,6 +146,16 @@ bool CaptureV4L2::configure_device(int fd, const CaptureParams &params) {
   sp.parm.capture.timeperframe.numerator = 1;
   sp.parm.capture.timeperframe.denominator = params.fps;
   xioctl(fd, VIDIOC_S_PARM, &sp); // best effort
+  if (xioctl(fd, VIDIOC_G_PARM, &sp)) {
+    const auto num = sp.parm.capture.timeperframe.numerator;
+    const auto den = sp.parm.capture.timeperframe.denominator;
+    if (num > 0 && den > 0) {
+      const int fps = static_cast<int>(den / num);
+      if (fps > 0) {
+        params.fps = fps;
+      }
+    }
+  }
 
   if (use_mmap_) {
     // Request buffers

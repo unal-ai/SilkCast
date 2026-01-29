@@ -132,7 +132,7 @@
 - Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264` → YUYV (converted to I420).
 - H.264 encoding via optional OpenH264 (Cisco binary recommended for patent coverage); Annex-B NALs streamed over HTTP chunked.
 - MJPEG and H.264 share lazy sessions; codec mismatches return 409 with `Effective-Params`.
-- CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens a demo stream for the first device (override with env vars).
+- CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).
 - Packaging: `scripts/build_linux.sh` for amd64/arm64; systemd unit at `packaging/systemd/silkcast.service`. Non-Linux builds stub capture.
 - I420 conversion is foundational; keep a fast YUYV→I420 path and avoid buffering (“latest frame only”) for preview/tele-op use. 
 - Stats: `/stream/{id}/stats` returns fps/bitrate estimates based on sent frames/bytes; session tracks frames/bytes/clients and resets on first start. IDR forced on client join for H.264.
