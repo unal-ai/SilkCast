@@ -33,31 +33,26 @@ bool H264Encoder::init(const CaptureParams &params) {
   p.iTargetBitrate = bitrate_kbps_ * 1000;
   p.iRCMode = RC_BITRATE_MODE;
   p.fMaxFrameRate = static_cast<float>(fps_);
-  p.iTemporalLayerNum = 1;
-  p.iSpatialLayerNum = 1;
-  p.iMultipleThreadIdc = 1;
 
   if (enc_->Initialize(&p) != 0) {
     return false;
   }
 
-  // Baseline profile, zero-latency.
-  int profile = PRO_BASELINE;
-  enc_->SetOption(ENCODER_OPTION_PROFILE, &profile);
-  bool enable_denoise = false;
-  enc_->SetOption(ENCODER_OPTION_ENABLE_DENOISE, &enable_denoise);
-  int skip_frames = 0;
-  enc_->SetOption(ENCODER_OPTION_SKIP_FRAMES, &skip_frames);
-  bool cabac = false;
-  enc_->SetOption(ENCODER_OPTION_CABAC, &cabac);
+  // Note: ENCODER_OPTION_PROFILE removed - API changed in OpenH264 2.6.0, use
+  // default Set IDR interval (keyframe interval).
   int gop = params.gop > 0 ? params.gop : 30;
   enc_->SetOption(ENCODER_OPTION_IDR_INTERVAL, &gop);
+  // Disable frame skipping for consistent streaming.
+  bool frame_skip = false;
+  enc_->SetOption(ENCODER_OPTION_RC_FRAME_SKIP, &frame_skip);
 
   return true;
 }
 
-bool H264Encoder::encode_i420(const uint8_t* y, const uint8_t* u, const uint8_t* v, std::string &out) {
-  if (!enc_) return false;
+bool H264Encoder::encode_i420(const uint8_t *y, const uint8_t *u,
+                              const uint8_t *v, std::string &out) {
+  if (!enc_)
+    return false;
 
   const int y_size = width_ * height_;
   const int uv_width = width_ / 2;
@@ -88,14 +83,16 @@ bool H264Encoder::encode_i420(const uint8_t* y, const uint8_t* u, const uint8_t*
       (void)p; // silence unused warning
     }
     int total = 0;
-    for (int j = 0; j < layer.iNalCount; ++j) total += layer.pNalLengthInByte[j];
-  out.append(reinterpret_cast<char *>(layer.pBsBuf), total);
+    for (int j = 0; j < layer.iNalCount; ++j)
+      total += layer.pNalLengthInByte[j];
+    out.append(reinterpret_cast<char *>(layer.pBsBuf), total);
   }
   return !out.empty();
 }
 
 void H264Encoder::force_idr() {
-  if (!enc_) return;
+  if (!enc_)
+    return;
   enc_->ForceIntraFrame(true);
 }
 
@@ -103,7 +100,10 @@ void H264Encoder::force_idr() {
 
 H264Encoder::~H264Encoder() = default;
 bool H264Encoder::init(const CaptureParams &) { return false; }
-bool H264Encoder::encode_i420(const uint8_t*, const uint8_t*, const uint8_t*, std::string &) { return false; }
+bool H264Encoder::encode_i420(const uint8_t *, const uint8_t *, const uint8_t *,
+                              std::string &) {
+  return false;
+}
 void H264Encoder::force_idr() {}
 
 #endif

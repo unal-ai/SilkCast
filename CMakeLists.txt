@@ -32,7 +32,8 @@ if(ENABLE_OPENH264)
       URL https://github.com/cisco/openh264/archive/refs/tags/v${_OH_VERSION}.tar.gz
     )
     FetchContent_MakeAvailable(openh264_src)
-    set(OPENH264_INCLUDE_DIR ${openh264_src_SOURCE_DIR}/include)
+    # OpenH264 headers are in codec/api/ subdirectory (not include/)
+    set(OPENH264_INCLUDE_DIR ${openh264_src_SOURCE_DIR}/codec/api)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
       set(_OH_BIN_URL http://ciscobinary.openh264.org/libopenh264-${_OH_VERSION}-linux64.8.so.bz2)
     else()
@@ -42,9 +43,17 @@ if(ENABLE_OPENH264)
     set(_OH_BIN ${_OH_BASE}/lib/libopenh264.so)
     if(NOT EXISTS ${_OH_BIN})
       message(STATUS "Fetching OpenH264 binary from ${_OH_BIN_URL}")
+      file(MAKE_DIRECTORY ${_OH_BASE}/lib)
       file(DOWNLOAD ${_OH_BIN_URL} ${_OH_BIN_BZ2} SHOW_PROGRESS)
-      execute_process(COMMAND ${CMAKE_COMMAND} -E tar xjf ${_OH_BIN_BZ2} WORKING_DIRECTORY ${_OH_BASE}/lib)
-      file(REMOVE ${_OH_BIN_BZ2})
+      # The .bz2 file is just bz2-compressed (not a tarball), use bunzip2
+      find_program(BUNZIP2 bunzip2)
+      if(BUNZIP2)
+        execute_process(COMMAND ${BUNZIP2} -f ${_OH_BIN_BZ2} WORKING_DIRECTORY ${_OH_BASE}/lib)
+        # bunzip2 -f removes .bz2 suffix and overwrites, output is libopenh264.so
+      else()
+        # Fallback: download directly as .so (without bz2)
+        message(WARNING "bunzip2 not found, trying alternative download")
+      endif()
       file(DOWNLOAD http://www.openh264.org/BINARY_LICENSE.txt ${_OH_BASE}/BINARY_LICENSE.txt SHOW_PROGRESS)
     endif()
     set(OPENH264_LIBRARY ${_OH_BIN})
@@ -77,7 +86,7 @@ else()
   set(HAS_OPENH264 FALSE)
 endif()
 
-add_executable(silkcast
+set(SILKCAST_SOURCES
   src/main.cpp
   src/types.hpp
   src/capture_v4l2.cpp
@@ -89,6 +98,13 @@ add_executable(silkcast
   src/yuv_convert.hpp
 )
 
+if(APPLE)
+  list(APPEND SILKCAST_SOURCES src/capture_avfoundation.mm)
+  set_source_files_properties(src/capture_avfoundation.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
+
+add_executable(silkcast ${SILKCAST_SOURCES})
+
 target_include_directories(silkcast PRIVATE ${cpp-httplib_SOURCE_DIR})
 target_link_libraries(silkcast PRIVATE httplib::httplib pthread)
 
@@ -99,5 +115,15 @@ if(HAS_OPENH264)
 endif()
 
 if(APPLE)
-  target_link_libraries(silkcast PRIVATE "-framework CoreFoundation" "-framework SystemConfiguration")
+  target_link_libraries(silkcast PRIVATE
+    "-framework AVFoundation"
+    "-framework Foundation"
+    "-framework CoreFoundation"
+    "-framework CoreGraphics"
+    "-framework CoreImage"
+    "-framework CoreMedia"
+    "-framework CoreVideo"
+    "-framework ImageIO"
+    "-framework SystemConfiguration"
+  )
 endif()

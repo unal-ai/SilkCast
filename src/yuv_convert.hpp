@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 
 // Convert a single YUYV 4:2:2 frame to planar I420 (YUV420p).
 // Assumes width and height are even.
@@ -39,3 +40,25 @@ inline void yuyv_to_i420(const uint8_t* src, int width, int height,
   }
 }
 
+// Convert NV12 (Y + interleaved UV) to planar I420 (YUV420p).
+// Assumes width and height are even.
+inline void nv12_to_i420(const uint8_t* src_y, const uint8_t* src_uv,
+                         int width, int height, int src_y_stride,
+                         int src_uv_stride, uint8_t* dst_y, uint8_t* dst_u,
+                         uint8_t* dst_v) {
+  for (int y = 0; y < height; ++y) {
+    const uint8_t* row = src_y + y * src_y_stride;
+    uint8_t* out = dst_y + y * width;
+    std::memcpy(out, row, width);
+  }
+  const int uv_height = height / 2;
+  for (int y = 0; y < uv_height; ++y) {
+    const uint8_t* row = src_uv + y * src_uv_stride;
+    uint8_t* out_u = dst_u + y * (width / 2);
+    uint8_t* out_v = dst_v + y * (width / 2);
+    for (int x = 0; x < width; x += 2) {
+      out_u[x / 2] = row[x + 0];
+      out_v[x / 2] = row[x + 1];
+    }
+  }
+}

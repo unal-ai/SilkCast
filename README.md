@@ -6,7 +6,7 @@ Built to be both a foundation and a drop-in endpoint, it scales from single USB 
 cmake -S . -B build
 cmake --build build
 ./build/silkcast
-# or: scripts/launch_desktop.sh   # double-click friendly, opens /device/list
+# or: scripts/launch_desktop.sh   # double-click friendly, opens a demo stream
 ```
 Endpoints (early stub):
 - `GET /device/list`
@@ -27,6 +27,13 @@ Endpoints (early stub):
 - `--port <port>` bind port (default `8080`)
 - `--idle-timeout <s>` idle seconds before device teardown (default `10`)
 - `--codec <mjpeg|h264>` default codec when not specified (default `mjpeg`)
+
+### Desktop launcher (demo)
+`scripts/launch_desktop.sh` builds, runs, then opens a demo stream for the first
+device. Override behavior with environment variables:
+- `DEMO_MODE=list` to open `/device/list` instead.
+- `STREAM_DEVICE=video1` to pick a specific device.
+- `STREAM_CODEC=mjpeg` or `STREAM_PARAMS=codec=mjpeg&fps=15` to control stream.
 
 ### Requirements
 - Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging. Non-Linux builds compile but camera capture stubs out.

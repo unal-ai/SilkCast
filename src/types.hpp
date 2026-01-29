@@ -19,6 +19,7 @@ struct CaptureParams {
 enum class PixelFormat {
   MJPEG,
   YUYV,
+  NV12,
   UNKNOWN
 };
 
