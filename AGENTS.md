@@ -137,6 +137,8 @@
 - I420 conversion is foundational; keep a fast YUYV→I420 path and avoid buffering (“latest frame only”) for preview/tele-op use. 
 - Stats: `/stream/{id}/stats` returns fps/bitrate estimates based on sent frames/bytes; session tracks frames/bytes/clients and resets on first start. IDR forced on client join for H.264.
 - WebSocket: `/stream/ws?id={id}&codec=...` streams binary MJPEG or H.264 NALs.
-- UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends best-effort UDP (Annex-B or MJPEG) for ultra-low latency; Linux only, kernel fragmentation (MTU best effort).
+- UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends fragmented packets with a custom binary header `[frame_id:4][frag_id:2][num_frags:2][data_size:4]` + payload. This enables robust reassembly and frame recovery on the client side.
+- Feedback Loop: `POST /stream/{id}/feedback?type=idr` allows clients to request Instant Decoder Refresh (critical for H.264 packet loss recovery).
+- Client SDK: `client/silkcast_client.py` provided as a reference Python implementation for high-performance receiving (replacing `cv2.VideoCapture`).
 - fMP4: `/stream/live/{id}?codec=h264&container=mp4` returns chunked fragmented MP4 (tiny fragments, Baseline, IDR on join). CORS + no-store headers applied.
 - OpenH264 fetch: Enabled by default. `AUTO_FETCH_OPENH264=ON` auto-downloads Cisco v2.6.0 binary+headers on Linux x86_64/arm64; else set `OPENH264_ROOT` or system install. Disable with `-DENABLE_OPENH264=OFF` if licensing blocks usage.

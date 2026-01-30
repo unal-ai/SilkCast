@@ -462,6 +462,7 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
 
         const int frame_interval_ms = std::max(1, 1000 / std::max(1, p.fps));
         bool first = true;
+        uint32_t last_idr = session->idr_request_seq.load();
         for (;;) {
           if (!session->capture || !session->capture->running()) {
             std::this_thread::sleep_for(20ms);
@@ -486,6 +487,11 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
           if (first) {
             encoder.force_idr();
             first = false;
+          }
+          uint32_t current_idr = session->idr_request_seq.load();
+          if (current_idr > last_idr) {
+            encoder.force_idr();
+            last_idr = current_idr;
           }
           std::string nal;
           if (!encoder.encode_i420(y, u, v, nal)) {
@@ -554,7 +560,12 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
                                                       sps, pps);
           mux = mux_guard.get();
         }
+        uint32_t last_idr = session->idr_request_seq.load();
         while (true) {
+          if (session->idr_request_seq.load() > last_idr) {
+            encoder.force_idr();
+            last_idr = session->idr_request_seq.load();
+          }
           if (!session->capture || !session->capture->running()) {
             std::this_thread::sleep_for(10ms);
             continue;

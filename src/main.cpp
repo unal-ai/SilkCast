@@ -6,6 +6,7 @@
 
 #include "api_router.hpp"
 #include "capture_v4l2.hpp"
+#include "client_pull.hpp"
 #include "encoder_h264.hpp"
 #include "httplib.h"
 #include "index_html.hpp"
@@ -29,6 +30,7 @@ int main(int argc, char *argv[]) {
     int port = 8080;
     int idle_timeout = 10;
     std::string default_codec = "mjpeg";
+    std::string connect_target = "";
   } cfg;
 
   for (int i = 1; i < argc; ++i) {
@@ -41,6 +43,8 @@ int main(int argc, char *argv[]) {
       cfg.idle_timeout = std::stoi(argv[++i]);
     } else if (arg == "--codec" && i + 1 < argc) {
       cfg.default_codec = std::string(argv[++i]);
+    } else if (arg == "--connect" && i + 1 < argc) {
+      cfg.connect_target = argv[++i];
     } else if (arg == "--help" || arg == "-h") {
       std::cout << "SilkCast\n"
                 << "  --addr <ip>          Bind address (default 0.0.0.0)\n"
@@ -48,9 +52,15 @@ int main(int argc, char *argv[]) {
                 << "  --idle-timeout <s>   Idle seconds before closing device "
                    "(default 10)\n"
                 << "  --codec <mjpeg|h264> Default codec if not specified "
-                   "(default mjpeg)\n";
+                   "(default mjpeg)\n"
+                << "  --connect <ip:port>  Run as client (pull stream from "
+                   "server)\n";
       return 0;
     }
+  }
+
+  if (!cfg.connect_target.empty()) {
+    return run_client(cfg.connect_target);
   }
 
   SessionManager sessions(cfg.idle_timeout);
@@ -419,10 +429,13 @@ int main(int argc, char *argv[]) {
              }
            }
 #endif
+
            auto start = std::chrono::steady_clock::now();
+           uint32_t last_idr = session->idr_request_seq.load();
            const int frame_interval_ms =
                std::max(1, 1000 / std::max(1, params.fps));
            const size_t mtu = 1400;
+           uint32_t frame_sequence = 0;
 
            while (true) {
              auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -430,6 +443,18 @@ int main(int argc, char *argv[]) {
                                 .count();
              if (elapsed >= duration_sec)
                break;
+
+             // Check for IDR requests
+             uint32_t current_idr = session->idr_request_seq.load();
+             if (current_idr > last_idr) {
+#ifdef HAS_OPENH264
+               if (encoder_ready) {
+                 encoder.force_idr();
+               }
+#endif
+               last_idr = current_idr;
+             }
+
              if (!session->capture || !session->capture->running()) {
                std::this_thread::sleep_for(10ms);
                continue;
@@ -439,16 +464,13 @@ int main(int argc, char *argv[]) {
                continue;
              }
 
+             const uint8_t *p_data = nullptr;
+             size_t p_size = 0;
+             std::string h264_buf;
+
              if (params.codec == "mjpeg") {
-               size_t offset = 0;
-               while (offset < frame.size()) {
-                 size_t chunk = std::min(mtu, frame.size() - offset);
-                 sendto(sock, frame.data() + offset, chunk, 0,
-                        reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-                 offset += chunk;
-               }
-               session->frames_sent.fetch_add(1);
-               session->bytes_sent.fetch_add(frame.size());
+               p_data = reinterpret_cast<const uint8_t *>(frame.data());
+               p_size = frame.size();
              } else if (params.codec == "h264") {
 #ifdef HAS_OPENH264
                if (!encoder_ready)
@@ -477,20 +499,47 @@ int main(int argc, char *argv[]) {
                  std::this_thread::sleep_for(5ms);
                  continue;
                }
-               static const char start_code[] = {0x00, 0x00, 0x00, 0x01};
-               std::string packet;
-               packet.reserve(sizeof(start_code) + nal.size());
-               packet.append(start_code, sizeof(start_code));
-               packet.append(nal);
-               sendto(sock, packet.data(), packet.size(), 0,
-                      reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-               session->frames_sent.fetch_add(1);
-               session->bytes_sent.fetch_add(packet.size());
+               if (!nal.empty()) {
+                 static const char start_code[] = {0x00, 0x00, 0x00, 0x01};
+                 h264_buf.reserve(sizeof(start_code) + nal.size());
+                 h264_buf.append(start_code, sizeof(start_code));
+                 h264_buf.append(nal);
+                 p_data = reinterpret_cast<const uint8_t *>(h264_buf.data());
+                 p_size = h264_buf.size();
+               }
 #else
                break;
 #endif
              } else {
                break;
+             }
+
+             if (p_size > 0) {
+               size_t max_payload = mtu - sizeof(UdpFrameHeader);
+               size_t offset = 0;
+               uint16_t frag_id = 0;
+               uint16_t num_frags = (p_size + max_payload - 1) / max_payload;
+
+               while (offset < p_size) {
+                 size_t chunk = std::min(max_payload, p_size - offset);
+                 UdpFrameHeader header;
+                 header.frame_id = frame_sequence;
+                 header.frag_id = frag_id++;
+                 header.num_frags = num_frags;
+                 header.data_size = chunk;
+
+                 std::vector<uint8_t> packet(sizeof(header) + chunk);
+                 memcpy(packet.data(), &header, sizeof(header));
+                 memcpy(packet.data() + sizeof(header), p_data + offset, chunk);
+
+                 sendto(sock, packet.data(), packet.size(), 0,
+                        reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+
+                 session->bytes_sent.fetch_add(packet.size());
+                 offset += chunk;
+               }
+               session->frames_sent.fetch_add(1);
+               frame_sequence++;
              }
              session->last_accessed = std::chrono::steady_clock::now();
              std::this_thread::sleep_for(
@@ -512,6 +561,42 @@ int main(int argc, char *argv[]) {
                                       "UDP sender supported on Linux only"),
              "application/json");
 #endif
+       }});
+
+  // Feedback route (IDR Request)
+  api.add_route(
+      {"/stream/{device}/feedback",
+       "POST",
+       "Send feedback (e.g. request IDR)",
+       {{"device", ParamType::Device, "video0", "Device ID"},
+        {"type", ParamType::Select, "idr", "Feedback Type", {"idr"}}},
+       [&sessions](const httplib::Request &req, httplib::Response &res) {
+         if (req.matches.size() < 2) {
+           res.status = 404;
+           return;
+         }
+         std::string device_id = req.matches[1].str();
+         auto session_opt = sessions.find(device_id);
+         if (!session_opt) {
+           res.status = 404;
+           res.set_content(
+               stream::build_error_json("not_found", "session not active"),
+               "application/json");
+           return;
+         }
+         auto session = *session_opt;
+         std::string type = req.get_param_value("type");
+         if (type == "idr") {
+           session->idr_request_seq.fetch_add(1);
+           res.status = 200;
+           res.set_content("{\"status\":\"idr_requested\"}",
+                           "application/json");
+         } else {
+           res.status = 400;
+           res.set_content(
+               stream::build_error_json("bad_request", "unknown feedback type"),
+               "application/json");
+         }
        }});
 
   api.register_with(svr);

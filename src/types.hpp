@@ -41,4 +41,14 @@ struct Session {
       std::chrono::steady_clock::now();
   std::atomic<uint64_t> frames_sent{0};
   std::atomic<uint64_t> bytes_sent{0};
+  std::atomic<uint32_t> idr_request_seq{0};
 };
+
+#pragma pack(push, 1)
+struct UdpFrameHeader {
+  uint32_t frame_id;
+  uint16_t frag_id;
+  uint16_t num_frags;
+  uint32_t data_size; // Payload size in this packet
+};
+#pragma pack(pop)

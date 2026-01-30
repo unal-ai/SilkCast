@@ -17,6 +17,10 @@ Endpoints (early stub):
 - `GET /stream/ws?id={id}&codec=mjpeg|h264` (WebSocket binary frames)
 - `GET /stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` (best-effort UDP; Linux only; MTU-frag by kernel)
 
+### Lightweight pull clients
+- `docs/pull_client.md`: Python MJPEG receiver, without dependency of OpenCV/FFmpeg。
+- `docs/h264_pull_client.md`: C++ H.264 pull stream + OpenH264 decoding example, convenient for low-latency processing chain.
+
 ### H.264 / OpenH264 (ON by default)
 - H.264 is enabled by default via OpenH264. Disable with `-DENABLE_OPENH264=OFF` if you cannot use Cisco’s binary license.
 - On Linux x86_64/arm64, we auto-fetch Cisco’s official v2.6.0 binary + headers during CMake if `AUTO_FETCH_OPENH264=ON` (default). This keeps the Cisco binary license path intact.

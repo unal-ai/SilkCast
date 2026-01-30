@@ -100,6 +100,7 @@ set(SILKCAST_SOURCES
   src/mp4_frag.cpp
   src/mp4_frag.hpp
   src/yuv_convert.hpp
+  src/client_pull.cpp
 )
 
 if(APPLE)
