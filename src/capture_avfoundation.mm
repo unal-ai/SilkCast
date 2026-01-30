@@ -2,12 +2,13 @@
 #include "capture_v4l2.hpp"
 
 #import <AVFoundation/AVFoundation.h>
+#import <AvailabilityMacros.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
-#import <AvailabilityMacros.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -34,8 +35,8 @@ bool parse_index(const std::string &id, int &index) {
 }
 
 NSArray<AVCaptureDevice *> *enumerate_devices() {
-  NSMutableArray<AVCaptureDeviceType> *types =
-      [NSMutableArray arrayWithObject:AVCaptureDeviceTypeBuiltInWideAngleCamera];
+  NSMutableArray<AVCaptureDeviceType> *types = [NSMutableArray
+      arrayWithObject:AVCaptureDeviceTypeBuiltInWideAngleCamera];
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 140000
   [types addObject:AVCaptureDeviceTypeExternal];
 #else
@@ -44,11 +45,10 @@ NSArray<AVCaptureDevice *> *enumerate_devices() {
   if (@available(macOS 13.0, *)) {
     [types addObject:AVCaptureDeviceTypeContinuityCamera];
   }
-  AVCaptureDeviceDiscoverySession *session =
-      [AVCaptureDeviceDiscoverySession
-          discoverySessionWithDeviceTypes:types
-                                mediaType:AVMediaTypeVideo
-                                 position:AVCaptureDevicePositionUnspecified];
+  AVCaptureDeviceDiscoverySession *session = [AVCaptureDeviceDiscoverySession
+      discoverySessionWithDeviceTypes:types
+                            mediaType:AVMediaTypeVideo
+                             position:AVCaptureDevicePositionUnspecified];
   return session.devices;
 }
 
@@ -236,9 +236,8 @@ bool CaptureV4L2::start(const std::string &device_id,
     impl_->ci_context = [CIContext contextWithOptions:nil];
     impl_->want_mjpeg = want_mjpeg;
 
-    CMVideoDimensions dims =
-        CMVideoFormatDescriptionGetDimensions(device.activeFormat
-                                                  .formatDescription);
+    CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(
+        device.activeFormat.formatDescription);
     if (dims.width > 0 && dims.height > 0) {
       params_.width = dims.width;
       params_.height = dims.height;
@@ -298,13 +297,12 @@ void CaptureV4L2::handle_sample(void *sample_buffer) {
                                                     fromRect:rect];
       if (cg_image) {
         NSMutableData *data = [NSMutableData data];
-        CGImageDestinationRef dest =
-            CGImageDestinationCreateWithData((CFMutableDataRef)data,
-                                             CFSTR("public.jpeg"), 1, NULL);
+        CGImageDestinationRef dest = CGImageDestinationCreateWithData(
+            (CFMutableDataRef)data, CFSTR("public.jpeg"), 1, NULL);
         if (dest) {
-          NSDictionary *props = @{
-            (id)kCGImageDestinationLossyCompressionQuality : @(0.8)
-          };
+          const double quality = std::clamp(params_.quality, 1, 100) / 100.0;
+          NSDictionary *props =
+              @{(id)kCGImageDestinationLossyCompressionQuality : @(quality)};
           CGImageDestinationAddImage(dest, cg_image,
                                      (__bridge CFDictionaryRef)props);
           CGImageDestinationFinalize(dest);

@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
 
@@ -135,6 +136,44 @@ bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
     std::cerr << "Device did not provide raw frames for H264, got "
               << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
     return false;
+  }
+  if (params.codec == "mjpeg") {
+    // Clamp to driver-friendly range.
+    params.quality = std::clamp(params.quality, 1, 100);
+    bool quality_set = false;
+    __u32 applied_ctrl = 0;
+
+    v4l2_control ctrl{};
+    ctrl.id = V4L2_CID_JPEG_COMPRESSION_QUALITY;
+    ctrl.value = params.quality;
+    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl)) {
+      quality_set = true;
+      applied_ctrl = ctrl.id;
+    } else {
+      std::cerr << "VIDIOC_S_CTRL(JPEG_COMPRESSION_QUALITY) failed; errno="
+                << errno << "\n";
+    }
+    if (!quality_set) {
+      ctrl.id = V4L2_CID_JPEG_Q_FACTOR;
+      ctrl.value = params.quality;
+      if (xioctl(fd, VIDIOC_S_CTRL, &ctrl)) {
+        quality_set = true;
+        applied_ctrl = ctrl.id;
+      } else {
+        std::cerr << "VIDIOC_S_CTRL(JPEG_Q_FACTOR) failed; errno=" << errno
+                  << "\n";
+      }
+    }
+    if (quality_set && applied_ctrl != 0) {
+      v4l2_control get{};
+      get.id = applied_ctrl;
+      if (xioctl(fd, VIDIOC_G_CTRL, &get)) {
+        params.quality = get.value;
+      }
+      std::cerr << "MJPEG quality set to " << params.quality
+                << " via control 0x" << std::hex << applied_ctrl << std::dec
+                << "\n";
+    }
   }
   std::cerr << "Format set: " << params.width << "x" << params.height
             << " fourcc=" << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";

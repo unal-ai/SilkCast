@@ -91,6 +91,10 @@ set(SILKCAST_SOURCES
   src/types.hpp
   src/capture_v4l2.cpp
   src/capture_v4l2.hpp
+  src/session_manager.cpp
+  src/session_manager.hpp
+  src/stream_utils.cpp
+  src/stream_utils.hpp
   src/encoder_h264.cpp
   src/encoder_h264.hpp
   src/mp4_frag.cpp
