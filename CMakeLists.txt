@@ -94,12 +94,15 @@ set(SILKCAST_SOURCES
   src/adapter_registry.hpp
   src/types.hpp
   src/capture_interface.hpp
+  src/capture_avfoundation.hpp
   src/capture_v4l2.cpp
   src/capture_v4l2.hpp
   src/capture_rtsp.cpp
   src/capture_rtsp.hpp
   src/session_manager.cpp
   src/session_manager.hpp
+  src/ws_server.cpp
+  src/ws_server.hpp
   src/stream_utils.cpp
   src/stream_utils.hpp
   src/encoder_h264.cpp
@@ -119,6 +122,10 @@ add_executable(silkcast ${SILKCAST_SOURCES})
 
 target_include_directories(silkcast PRIVATE ${cpp-httplib_SOURCE_DIR})
 target_link_libraries(silkcast PRIVATE httplib::httplib pthread)
+
+if(UNIX)
+  target_compile_definitions(silkcast PRIVATE HAS_WEBSOCKET_TRANSPORT=1)
+endif()
 
 if(HAS_OPENH264)
   target_compile_definitions(silkcast PRIVATE HAS_OPENH264=1)

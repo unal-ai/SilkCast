@@ -13,10 +13,11 @@ Endpoints (early stub):
 - `GET /system/info`
 - `GET /capabilities` (single-source capability snapshot: codecs, containers, media kinds, adapter registrations)
 - `GET /stream/live/{id}?media=video&codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
-- `GET /device/{id}/caps` (V4L2 native formats, resolutions, and frame intervals; Linux only)
+- `GET /device/{id}/caps` (native device capabilities: V4L2 formats on Linux, AVFoundation formats on macOS)
 - `GET /stream/live/{id}?codec=h264&container=mp4` (chunked fMP4: Baseline, IDR on join, tiny fragments)
 - `GET /stream/{id}/stats`
-- `GET /stream/ws/{id}` and `GET /stream/ws?id={id}` (currently returns `501 not_implemented` in this `cpp-httplib v0.15.x` build; reserved for WS transport)
+- `ws://{host}:{ws_port}/stream/ws/{id}` and `ws://{host}:{ws_port}/stream/ws?id={id}` (binary WS frames; shared lazy session/refcount path)
+- `GET /stream/ws/{id}` and `GET /stream/ws?id={id}` (HTTP hint route; returns `426 upgrade_required` + `ws_url`)
 - `GET /stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` (best-effort UDP; Linux only; MTU-frag by kernel)
 - Capability negotiation uses strong central registries (`src/capability_registry.*` + `src/adapter_registry.*`), so codec/container/media/transport support is defined in one place.
 
@@ -48,6 +49,7 @@ Notes:
 ### CLI flags
 - `--addr <ip>` bind address (default `0.0.0.0`)
 - `--port <port>` bind port (default `8080`)
+- `--ws-port <port>` websocket sidecar port (default `port+1`, use `0` to disable)
 - `--idle-timeout <s>` idle seconds before device teardown (default `10`)
 - `--codec <mjpeg|h264>` default codec when not specified (default `mjpeg`)
 
@@ -64,10 +66,11 @@ Override behavior with environment variables:
 `scripts/rtsp_smoke.sh` spins up `mediamtx` + a synthetic RTSP publisher (`ffmpeg`), starts SilkCast, requests encoded RTSP relay over fMP4, and validates `ftyp` output.
 
 ### API smoke test (fast contract check)
-`scripts/smoke_api.sh` validates key HTTP contracts (`/system/info`, `/capabilities`, bad-param `400`, WebSocket placeholder behavior, encoded RTSP route + stats lifecycle fields).
+`scripts/smoke_api.sh` validates key HTTP contracts (`/system/info`, `/capabilities`, bad-param `400`, websocket upgrade hints + sidecar listener behavior, encoded RTSP route + stats lifecycle fields).
 
 ### Requirements
-- Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging. Non-Linux builds compile but camera capture stubs out.
+- Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging.
+- macOS uses AVFoundation capture path and supports `/device/{id}/caps` capability introspection.
 - No Docker required; single binary.
 
 ### Builds (Linux amd64/arm64)

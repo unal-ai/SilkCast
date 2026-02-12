@@ -4,11 +4,8 @@
 #include <filesystem>
 #include <iostream>
 
+#include "capture_avfoundation.hpp"
 #include "capture_rtsp.hpp"
-
-#ifdef __APPLE__
-std::vector<std::string> list_avfoundation_devices();
-#endif
 #ifdef __linux__
 #include <fcntl.h>
 #include <linux/videodev2.h>

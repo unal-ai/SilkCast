@@ -7,6 +7,7 @@ cd "${ROOT_DIR}"
 SILKCAST_BIN="${SILKCAST_BIN:-${ROOT_DIR}/build/silkcast}"
 ADDR="${ADDR:-127.0.0.1}"
 PORT="${PORT:-18080}"
+WS_PORT="${WS_PORT:-$((PORT + 1))}"
 TMP_DIR="${TMP_DIR:-${TMPDIR:-/tmp}}"
 
 if [[ ! -x "${SILKCAST_BIN}" ]]; then
@@ -54,7 +55,7 @@ expect_body_contains() {
 }
 
 echo "Starting SilkCast on ${ADDR}:${PORT}..."
-"${SILKCAST_BIN}" --addr "${ADDR}" --port "${PORT}" > "${LOG_FILE}" 2>&1 &
+"${SILKCAST_BIN}" --addr "${ADDR}" --port "${PORT}" --ws-port "${WS_PORT}" > "${LOG_FILE}" 2>&1 &
 SERVER_PID=$!
 
 ready=0
@@ -71,6 +72,8 @@ fi
 
 expect_code "system/info" "200" "http://${ADDR}:${PORT}/system/info"
 expect_body_contains "system/info" "\"version\""
+expect_body_contains "system/info" "\"ws_port\":${WS_PORT}"
+expect_body_contains "system/info" "\"ws_enabled\":true"
 
 expect_code "capabilities" "200" "http://${ADDR}:${PORT}/capabilities"
 expect_body_contains "capabilities" "\"codecs\""
@@ -78,11 +81,15 @@ expect_body_contains "capabilities" "\"codecs\""
 expect_code "bad param" "400" "http://${ADDR}:${PORT}/stream/live/video0?w=abc"
 expect_body_contains "bad param" "\"field\":\"w\""
 
-expect_code "ws query" "501" "http://${ADDR}:${PORT}/stream/ws?id=video0"
-expect_body_contains "ws query" "\"not_implemented\""
+expect_code "ws query" "426" "http://${ADDR}:${PORT}/stream/ws?id=video0"
+expect_body_contains "ws query" "\"upgrade_required\""
+expect_body_contains "ws query" "\"ws_url\":\"ws://${ADDR}:${WS_PORT}/stream/ws/video0\""
 
 expect_code "ws missing id" "400" "http://${ADDR}:${PORT}/stream/ws"
 expect_body_contains "ws missing id" "id query parameter is required"
+
+expect_code "ws sidecar upgrade required" "426" "http://${ADDR}:${WS_PORT}/stream/ws/video0"
+expect_body_contains "ws sidecar upgrade required" "\"upgrade_required\""
 
 # RTSP encoded route smoke:
 # trigger one attempt, then stats should expose lifecycle fields.

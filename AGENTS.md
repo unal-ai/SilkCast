@@ -223,6 +223,21 @@ Entries:
   - **Why:** Extend strong-registration discipline beyond codec/container to media and transport adapter surfaces, preventing route-local drift.
   - **Impact:** `media=video|audio|av` is now validated from a single source of truth; unsupported media paths fail predictably; adapter inventory is machine-readable at runtime.
   - **Rollback:** Revert `src/adapter_registry.*`, `src/main.cpp`, `src/types.hpp`, and `CMakeLists.txt` to the previous revision.
+- `[2026-02-12] [Codex] [WebSocket Sidecar Transport]`
+  - **What changed:** Added `src/ws_server.*` websocket sidecar transport with RFC6455 upgrade handling and binary frame streaming (`mjpeg`/`h264`) on `--ws-port` (default `port+1`); wired shared lazy session attach/detach and warm/start logic through the same `SessionManager`; changed HTTP `/stream/ws` routes to return `426 upgrade_required` hints with `ws_url`; surfaced `ws_port`/`ws_enabled` in `/system/info`; enabled `websocket_stream` adapter when WS transport is compiled.
+  - **Why:** Deliver working websocket transport without replacing the existing `cpp-httplib` HTTP stack, while preserving session correctness invariants.
+  - **Impact:** Websocket clients can now connect to `ws://host:ws_port/stream/ws/{id}` and reuse existing session lifecycle semantics; API smoke checks now validate upgrade hints and sidecar listener behavior instead of placeholder `501`.
+  - **Rollback:** Revert `src/ws_server.*`, `src/main.cpp`, `src/adapter_registry.cpp`, `CMakeLists.txt`, `scripts/smoke_api.sh`, `README.md`, and this `AGENTS.md` entry.
+- `[2026-02-12] [Codex] [macOS Device Caps Introspection]`
+  - **What changed:** Added AVFoundation capability snapshot builder (`build_avfoundation_caps_json`) in `src/capture_avfoundation.mm` with shared declarations in `src/capture_avfoundation.hpp`; wired `/device/{id}/caps` in `src/main.cpp` to return native format/fps capability JSON on macOS instead of Linux-only `caps_unavailable`; updated related docs.
+  - **Why:** Remove API contract gap on macOS and keep discovery/debug tooling useful outside Linux-only V4L2 environments.
+  - **Impact:** macOS now returns structured device capability data (active format + available formats/frame-rate ranges) for `/device/{id}/caps`; operators no longer hit unconditional Linux-only errors on supported macOS capture builds.
+  - **Rollback:** Revert `src/capture_avfoundation.*`, `src/main.cpp`, `src/session_manager.cpp`, `CMakeLists.txt`, `README.md`, and this `AGENTS.md` entry.
+- `[2026-02-12] [Codex] [Live/WS Conflict Softening]`
+  - **What changed:** Removed strict `409 params locked by first requester` rejection on `/stream/live` and websocket attach paths for codec/container mismatches; route now serves the first-session effective codec while still honoring per-request H.264 container choice (`raw`/`mp4`) when compatible, and reports actual output via `Effective-Params`.
+  - **Why:** Keep "Just GET" behavior resilient for follow-up clients instead of hard-failing on first-comer lock differences.
+  - **Impact:** Requests like `codec=h264` then `codec=mjpeg` on the same active device no longer fail with `409`; clients receive the running effective stream profile and can inspect `Effective-Params` for actual codec/container.
+  - **Rollback:** Revert `src/main.cpp`, `src/ws_server.cpp`, and this `AGENTS.md` entry.
 
 *(New agents: append entries; do not rewrite history.)*
 
@@ -278,12 +293,13 @@ Entries:
 - Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264` → YUYV (converted to I420).
 - RTSP input is supported via URL device IDs (`rtsp://...` encoded in path); RTSP sessions use H.264 pass-through where possible and reuse the same lazy session map/refcount cleanup semantics.
 - H.264 encoding via optional OpenH264 (Cisco binary recommended for patent coverage); Annex-B NALs streamed over HTTP chunked.
-- MJPEG and H.264 share lazy sessions; codec mismatches return 409 with `Effective-Params`.
-- CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).
-- Packaging: `scripts/build_linux.sh` for amd64/arm64; systemd unit at `packaging/systemd/silkcast.service`. Non-Linux builds stub capture.
+- MJPEG and H.264 share lazy sessions; follow-up mismatched codec requests are served with first-session effective output where possible, and actual output is surfaced via `Effective-Params` instead of hard `409`.
+- CLI flags: `--addr`, `--port`, `--ws-port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).
+- Packaging: `scripts/build_linux.sh` for amd64/arm64; systemd unit at `packaging/systemd/silkcast.service`. macOS uses AVFoundation capture; other non-Linux/non-Apple builds still use stubs.
 - I420 conversion is foundational; keep a fast YUYV→I420 path and avoid buffering (“latest frame only”) for preview/tele-op use. 
 - Stats: `/stream/{id}/stats` returns fps/bitrate estimates plus lifecycle/debug fields (`state`, `teardown_reason`, `startup_ms`, `first_frame_ms`, `first_iframe_ms`) based on session counters and transitions; session tracks frames/bytes/clients and resets counters on first start. IDR forced on client join for H.264.
-- WebSocket: current `cpp-httplib v0.15.x` build exposes `/stream/ws` and `/stream/ws/{id}` as explicit `501 not_implemented` placeholders; binary WS streaming is reserved for a websocket-capable server build.
+- Device caps: `/device/{id}/caps` returns native capability data on both Linux (V4L2) and macOS (AVFoundation), with platform-specific format metadata and frame-rate ranges.
+- WebSocket: binary websocket streaming is available via sidecar listener (`ws://host:ws_port/stream/ws/{id}` or query form). HTTP `GET /stream/ws*` routes return `426 upgrade_required` with `ws_url` hints. Sidecar startup status is exposed via `/system/info` fields `ws_port` and `ws_enabled`.
 - UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends fragmented packets with a custom binary header `[frame_id:4][frag_id:2][num_frags:2][data_size:4]` + payload. This enables robust reassembly and frame recovery on the client side.
 - Feedback Loop: `POST /stream/{id}/feedback?type=idr` allows clients to request Instant Decoder Refresh (critical for H.264 packet loss recovery).
 - Client SDK: `client/silkcast_client.py` provided as a reference Python implementation for high-performance receiving.

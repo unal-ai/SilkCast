@@ -9,6 +9,7 @@
 #include "api_router.hpp"
 #include "adapter_registry.hpp"
 #include "capability_registry.hpp"
+#include "capture_avfoundation.hpp"
 #include "capture_v4l2.hpp"
 #include "client_pull.hpp"
 #include "encoder_h264.hpp"
@@ -18,6 +19,7 @@
 #include "session_manager.hpp"
 #include "stream_utils.hpp"
 #include "types.hpp"
+#include "ws_server.hpp"
 #include "yuv_convert.hpp"
 
 #ifdef __linux__
@@ -34,6 +36,43 @@ std::string to_lower_copy(std::string s) {
     return static_cast<char>(std::tolower(c));
   });
   return s;
+}
+
+std::string host_without_port(const std::string &host_header) {
+  if (host_header.empty()) {
+    return stream::get_local_ip_address();
+  }
+  if (host_header.front() == '[') {
+    const auto close = host_header.find(']');
+    if (close != std::string::npos) {
+      return host_header.substr(0, close + 1);
+    }
+  }
+  const auto colon = host_header.find(':');
+  if (colon == std::string::npos) {
+    return host_header;
+  }
+  return host_header.substr(0, colon);
+}
+
+std::string url_encode(const std::string &value) {
+  static const char hex[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(value.size() * 3);
+  for (unsigned char c : value) {
+    const bool safe =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+        c == '~';
+    if (safe) {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(hex[(c >> 4) & 0x0F]);
+      out.push_back(hex[c & 0x0F]);
+    }
+  }
+  return out;
 }
 
 bool validate_media_params(const AdapterRegistry &adapters,
@@ -63,6 +102,7 @@ int main(int argc, char *argv[]) {
   struct Config {
     std::string addr = "0.0.0.0";
     int port = 8080;
+    int ws_port = -1;
     int idle_timeout = 10;
     std::string default_codec = "mjpeg";
     std::string connect_target = "";
@@ -74,6 +114,8 @@ int main(int argc, char *argv[]) {
       cfg.addr = argv[++i];
     } else if (arg == "--port" && i + 1 < argc) {
       cfg.port = std::stoi(argv[++i]);
+    } else if (arg == "--ws-port" && i + 1 < argc) {
+      cfg.ws_port = std::stoi(argv[++i]);
     } else if (arg == "--idle-timeout" && i + 1 < argc) {
       cfg.idle_timeout = std::stoi(argv[++i]);
     } else if (arg == "--codec" && i + 1 < argc) {
@@ -84,6 +126,8 @@ int main(int argc, char *argv[]) {
       std::cout << "SilkCast\n"
                 << "  --addr <ip>          Bind address (default 0.0.0.0)\n"
                 << "  --port <port>        Bind port   (default 8080)\n"
+                << "  --ws-port <port>     WebSocket sidecar port "
+                   "(default port+1, 0 disables)\n"
                 << "  --idle-timeout <s>   Idle seconds before closing device "
                    "(default 10)\n"
                 << "  --codec <mjpeg|h264> Default codec if not specified "
@@ -107,8 +151,27 @@ int main(int argc, char *argv[]) {
               << "' is not enabled in this build; falling back to 'mjpeg'\n";
     cfg.default_codec = "mjpeg";
   }
+  if (cfg.ws_port < 0) {
+    cfg.ws_port = cfg.port + 1;
+  }
+  if (cfg.ws_port == cfg.port) {
+    std::cerr << "ws-port cannot equal http port; disabling websocket sidecar\n";
+    cfg.ws_port = 0;
+  }
 
   SessionManager sessions(cfg.idle_timeout);
+  WebSocketServer ws_server(
+      sessions, registry, adapters,
+      WsServerConfig{cfg.addr, cfg.ws_port, cfg.default_codec});
+  bool ws_enabled = false;
+  if (cfg.ws_port > 0) {
+    ws_enabled = ws_server.start();
+    if (!ws_enabled) {
+      std::cerr << "websocket sidecar failed to start on port " << cfg.ws_port
+                << std::endl;
+    }
+  }
+
   httplib::Server svr;
   ApiRouter api;
 
@@ -183,37 +246,89 @@ int main(int argc, char *argv[]) {
                  "GET",
                  "Get basic server info",
                  {},
-                 [&cfg](const httplib::Request &, httplib::Response &res) {
+                 [&cfg, ws_enabled](const httplib::Request &,
+                                    httplib::Response &res) {
                    res.status = 200;
                    res.set_content(
                        "{"
                        "\"ip\":\"" + stream::get_local_ip_address() + "\","
                        "\"port\":" + std::to_string(cfg.port) + ","
+                       "\"ws_port\":" + std::to_string(cfg.ws_port) + ","
+                       "\"ws_enabled\":" +
+                           std::string(ws_enabled ? "true" : "false") + ","
                        "\"version\":\"1.0\""
                        "}",
                        "application/json");
                  }});
 
-  const auto ws_placeholder = [](const httplib::Request &,
-                                 httplib::Response &res) {
-    res.status = 501;
+  const auto ws_upgrade_hint = [&cfg, ws_enabled](const std::string &target,
+                                                  const httplib::Request &req,
+                                                  httplib::Response &res) {
+    if (!ws_enabled) {
+      res.status = 503;
+      res.set_content(
+          stream::build_error_json(
+              "websocket_unavailable",
+              "websocket sidecar failed to start; check ws-port"),
+          "application/json");
+      return;
+    }
+    const std::string host = host_without_port(req.get_header_value("Host"));
+    const std::string ws_url =
+        "ws://" + host + ":" + std::to_string(cfg.ws_port) + target;
+    res.status = 426;
+    res.set_header("Upgrade", "websocket");
     res.set_content(
-        stream::build_error_json(
-            "not_implemented",
-            "websocket transport requires a websocket-capable server build"),
+        "{"
+        "\"error\":\"upgrade_required\","
+        "\"details\":\"connect using a websocket client\","
+        "\"ws_url\":\"" +
+            json_escape(ws_url) + "\""
+            "}",
         "application/json");
   };
+
+  const auto append_ws_query_params = [](const httplib::Request &req,
+                                         std::string &ws_target) {
+    bool first = true;
+    const auto add_param = [&req, &ws_target, &first](const char *name) {
+      if (!req.has_param(name)) {
+        return;
+      }
+      ws_target += first ? "?" : "&";
+      first = false;
+      ws_target += name;
+      ws_target += "=";
+      ws_target += url_encode(req.get_param_value(name));
+    };
+    add_param("media");
+    add_param("w");
+    add_param("h");
+    add_param("fps");
+    add_param("bitrate");
+    add_param("quality");
+    add_param("gop");
+    add_param("codec");
+    add_param("latency");
+    add_param("container");
+  };
+
   api.add_route({"/stream/ws/{device}",
                  "GET",
-                 "WebSocket stream placeholder (requires WS-capable server)",
+                 "WebSocket stream endpoint (upgrade hint over HTTP)",
                  {{"device", ParamType::Device, "video0", "Device ID"}},
-                 ws_placeholder});
+                 [&ws_upgrade_hint, &append_ws_query_params](
+                     const httplib::Request &req, httplib::Response &res) {
+                   std::string ws_target = req.path;
+                   append_ws_query_params(req, ws_target);
+                   ws_upgrade_hint(ws_target, req, res);
+                 }});
   api.add_route({"/stream/ws",
                  "GET",
-                 "WebSocket stream placeholder (query id form)",
+                 "WebSocket stream endpoint (query id form)",
                  {{"id", ParamType::Device, "video0", "Device ID"}},
-                 [ws_placeholder](const httplib::Request &req,
-                                  httplib::Response &res) {
+                 [&ws_upgrade_hint, &append_ws_query_params](
+                     const httplib::Request &req, httplib::Response &res) {
                    if (!req.has_param("id") || req.get_param_value("id").empty()) {
                      res.status = 400;
                      res.set_content(
@@ -222,7 +337,10 @@ int main(int argc, char *argv[]) {
                          "application/json");
                      return;
                    }
-                   ws_placeholder(req, res);
+                   std::string ws_target =
+                       "/stream/ws/" + url_encode(req.get_param_value("id"));
+                   append_ws_query_params(req, ws_target);
+                   ws_upgrade_hint(ws_target, req, res);
                  }});
 
   api.add_route(
@@ -241,6 +359,18 @@ int main(int argc, char *argv[]) {
          std::string error;
          auto json = stream::build_device_caps_json(device_id, error);
          if (json.empty()) {
+           res.status = 503;
+           res.set_content(stream::build_error_json("caps_unavailable", error),
+                           "application/json");
+           return;
+         }
+         res.status = 200;
+         res.set_header("Content-Type", "application/json");
+         res.set_content(json, "application/json");
+#elif defined(__APPLE__)
+         std::string json;
+         std::string error;
+         if (!build_avfoundation_caps_json(device_id, json, error)) {
            res.status = 503;
            res.set_content(stream::build_error_json("caps_unavailable", error),
                            "application/json");
@@ -427,21 +557,6 @@ int main(int argc, char *argv[]) {
            sessions.release_if_idle(device_id);
          };
 
-         EffectiveParams eff{params, session->params};
-         eff.actual.container = params.container;
-         stream::add_effective_headers(res, eff);
-
-         if (params.media != session->params.media ||
-             params.codec != session->params.codec ||
-             params.container != session->params.container) {
-           res.status = 409;
-           res.set_content(stream::build_error_json(
-                               "conflict", "params locked by first requester"),
-                           "application/json");
-           detach_client();
-           return;
-         }
-
          auto on_done = [detach_client](bool) {
            detach_client();
          };
@@ -475,16 +590,21 @@ int main(int argc, char *argv[]) {
            session->teardown_reason.store(TeardownReason::None);
          }
 
-         EffectiveParams eff_actual{params, session->params};
-         eff_actual.actual.container = params.container;
+         CaptureParams effective_output = session->params;
+         if (effective_output.codec == "h264" && params.container == "mp4") {
+           effective_output.container = "mp4";
+         } else {
+           effective_output.container = "raw";
+         }
+         EffectiveParams eff_actual{params, effective_output};
          stream::add_effective_headers(res, eff_actual);
 
-         if (params.codec == "mjpeg") {
-           stream::serve_mjpeg_live(session->params, res, session, on_done);
-         } else if (params.codec == "h264") {
-           if (params.container == "mp4") {
+         if (effective_output.codec == "mjpeg") {
+           stream::serve_mjpeg_live(effective_output, res, session, on_done);
+         } else if (effective_output.codec == "h264") {
+           if (effective_output.container == "mp4") {
              std::string error;
-             if (!stream::preflight_fmp4_bootstrap(session->params, session,
+             if (!stream::preflight_fmp4_bootstrap(effective_output, session,
                                                    error)) {
                res.status = 503;
                res.set_content(
@@ -494,9 +614,9 @@ int main(int argc, char *argv[]) {
                detach_client();
                return;
              }
-             stream::serve_fmp4_live(session->params, res, session, on_done);
+             stream::serve_fmp4_live(effective_output, res, session, on_done);
            } else {
-             stream::serve_h264_live(session->params, res, session, on_done);
+             stream::serve_h264_live(effective_output, res, session, on_done);
            }
          } else {
            res.status = 500;

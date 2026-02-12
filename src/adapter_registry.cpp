@@ -52,6 +52,12 @@ AdapterRegistry::AdapterRegistry() {
   const bool linux_enabled = false;
 #endif
 
+#ifdef HAS_WEBSOCKET_TRANSPORT
+  const bool websocket_enabled = true;
+#else
+  const bool websocket_enabled = false;
+#endif
+
   register_adapter(
       {"v4l2_camera", AdapterRole::Input, "video", linux_enabled, {"live", "udp"}, {"linux"}, "V4L2 capture adapter"});
   register_adapter({"screen_mirror", AdapterRole::Input, "video", false, {"live"}, {"linux", "darwin", "windows"},
@@ -65,8 +71,11 @@ AdapterRegistry::AdapterRegistry() {
                     "HTTP live stream output"});
   register_adapter({"udp_stream", AdapterRole::Output, "video", linux_enabled, {"udp"}, {"linux"},
                     "UDP sender output"});
-  register_adapter({"websocket_stream", AdapterRole::Output, "video", false, {"ws"}, {"linux", "darwin", "windows"},
-                    "Reserved WebSocket output for WS-capable server build"});
+  register_adapter({"websocket_stream", AdapterRole::Output, "video", websocket_enabled, {"ws"},
+                    {"linux", "darwin", "windows"},
+                    websocket_enabled
+                        ? "WebSocket output (binary frames over websocket sidecar listener)"
+                        : "Reserved WebSocket output for WS-capable server build"});
   register_adapter({"virtual_camera", AdapterRole::Output, "video", false, {"virtual_camera"}, {"linux"},
                     "Reserved virtual camera output (v4l2loopback target)"});
   register_adapter({"virtual_microphone", AdapterRole::Output, "audio", false, {"virtual_microphone"}, {"linux"},

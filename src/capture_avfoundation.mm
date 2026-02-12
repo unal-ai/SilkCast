@@ -1,5 +1,8 @@
 #ifdef __APPLE__
 #include "capture_v4l2.hpp"
+#include "capture_avfoundation.hpp"
+
+#include "api_router.hpp"
 
 #import <AVFoundation/AVFoundation.h>
 #import <AvailabilityMacros.h>
@@ -9,9 +12,12 @@
 #import <ImageIO/ImageIO.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -73,6 +79,18 @@ AVCaptureDevice *select_device(const std::string &id) {
       return device;
     }
   }
+  return nil;
+}
+
+AVCaptureDevice *select_device_with_fallback(const std::string &id) {
+  AVCaptureDevice *selected = select_device(id);
+  if (selected) {
+    return selected;
+  }
+  NSArray<AVCaptureDevice *> *devices = enumerate_devices();
+  if (devices.count == 0) {
+    return nil;
+  }
   return devices[0];
 }
 
@@ -93,6 +111,62 @@ AVCaptureDeviceFormat *best_format(AVCaptureDevice *device, int width,
   }
   return best;
 }
+
+std::string format_double(double value) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3) << value;
+  std::string s = oss.str();
+  while (!s.empty() && s.back() == '0') {
+    s.pop_back();
+  }
+  if (!s.empty() && s.back() == '.') {
+    s.push_back('0');
+  }
+  if (s.empty()) {
+    return "0.0";
+  }
+  return s;
+}
+
+std::string fourcc_to_string(OSType code) {
+  char c[5] = {static_cast<char>((code >> 24) & 0xFF),
+               static_cast<char>((code >> 16) & 0xFF),
+               static_cast<char>((code >> 8) & 0xFF),
+               static_cast<char>(code & 0xFF), 0};
+  for (int i = 0; i < 4; ++i) {
+    unsigned char ch = static_cast<unsigned char>(c[i]);
+    if (!std::isprint(ch)) {
+      return "unknown";
+    }
+  }
+  return std::string(c, 4);
+}
+
+std::string fourcc_to_hex(OSType code) {
+  char buf[11] = {0};
+  std::snprintf(buf, sizeof(buf), "0x%08X", static_cast<unsigned int>(code));
+  return std::string(buf);
+}
+
+std::string position_to_string(AVCaptureDevicePosition position) {
+  switch (position) {
+  case AVCaptureDevicePositionBack:
+    return "back";
+  case AVCaptureDevicePositionFront:
+    return "front";
+  default:
+    return "unspecified";
+  }
+}
+
+double frame_duration_to_fps(CMTime duration) {
+  if (!CMTIME_IS_VALID(duration) || duration.value <= 0 ||
+      duration.timescale <= 0) {
+    return 0.0;
+  }
+  return static_cast<double>(duration.timescale) /
+         static_cast<double>(duration.value);
+}
 } // namespace
 
 std::vector<std::string> list_avfoundation_devices() {
@@ -107,6 +181,102 @@ std::vector<std::string> list_avfoundation_devices() {
     }
   }
   return devices_out;
+}
+
+bool build_avfoundation_caps_json(const std::string &device_id,
+                                  std::string &json_out,
+                                  std::string &error_out) {
+  json_out.clear();
+  error_out.clear();
+
+  @autoreleasepool {
+    NSArray<AVCaptureDevice *> *devices = enumerate_devices();
+    if (devices.count == 0) {
+      error_out = "no AVFoundation video device available";
+      return false;
+    }
+
+    AVCaptureDevice *device = select_device(device_id);
+    if (!device) {
+      error_out = "device not found";
+      return false;
+    }
+
+    std::ostringstream ss;
+    ss << "{";
+    ss << "\"device\":\"" << json_escape(device_id) << "\",";
+    ss << "\"card\":\""
+       << json_escape(device.localizedName
+                          ? std::string(device.localizedName.UTF8String)
+                          : std::string("unknown"))
+       << "\",";
+    ss << "\"driver\":\"avfoundation\",";
+    ss << "\"bus_info\":\""
+       << json_escape(device.uniqueID ? std::string(device.uniqueID.UTF8String)
+                                      : std::string("unknown"))
+       << "\",";
+    ss << "\"position\":\"" << position_to_string(device.position) << "\"";
+
+    AVCaptureDeviceFormat *active = device.activeFormat;
+    if (active) {
+      CMFormatDescriptionRef desc = active.formatDescription;
+      CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
+      OSType subtype = CMFormatDescriptionGetMediaSubType(desc);
+      ss << ",\"current\":{";
+      ss << "\"width\":" << dims.width << ",";
+      ss << "\"height\":" << dims.height << ",";
+      ss << "\"fourcc\":\"" << fourcc_to_string(subtype) << "\",";
+      ss << "\"fourcc_code\":\"" << fourcc_to_hex(subtype) << "\"";
+      const double min_fps =
+          frame_duration_to_fps(device.activeVideoMaxFrameDuration);
+      const double max_fps =
+          frame_duration_to_fps(device.activeVideoMinFrameDuration);
+      if (min_fps > 0.0 || max_fps > 0.0) {
+        ss << ",\"fps_min\":" << format_double(min_fps > 0.0 ? min_fps : max_fps);
+        ss << ",\"fps_max\":" << format_double(max_fps > 0.0 ? max_fps : min_fps);
+      }
+      ss << "}";
+    }
+
+    ss << ",\"formats\":[";
+    bool first_format = true;
+    for (AVCaptureDeviceFormat *format in device.formats) {
+      CMFormatDescriptionRef desc = format.formatDescription;
+      CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(desc);
+      if (dims.width <= 0 || dims.height <= 0) {
+        continue;
+      }
+      OSType subtype = CMFormatDescriptionGetMediaSubType(desc);
+      if (!first_format) {
+        ss << ",";
+      }
+      first_format = false;
+      ss << "{";
+      ss << "\"fourcc\":\"" << fourcc_to_string(subtype) << "\",";
+      ss << "\"fourcc_code\":\"" << fourcc_to_hex(subtype) << "\",";
+      ss << "\"width\":" << dims.width << ",";
+      ss << "\"height\":" << dims.height << ",";
+      ss << "\"intervals\":[";
+      bool first_interval = true;
+      for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
+        if (!first_interval) {
+          ss << ",";
+        }
+        first_interval = false;
+        ss << "{";
+        ss << "\"min_fps\":" << format_double(range.minFrameRate) << ",";
+        ss << "\"max_fps\":" << format_double(range.maxFrameRate);
+        ss << "}";
+      }
+      ss << "]";
+      ss << "}";
+    }
+    ss << "]";
+    ss << "}";
+
+    json_out = ss.str();
+    return true;
+  }
 }
 
 @interface FrameDelegate
@@ -156,7 +326,7 @@ bool CaptureV4L2::start(const std::string &device_id,
   params_ = params;
 
   @autoreleasepool {
-    AVCaptureDevice *device = select_device(device_id_);
+    AVCaptureDevice *device = select_device_with_fallback(device_id_);
     if (!device) {
       std::cerr << "No AVFoundation video device available\n";
       return false;
