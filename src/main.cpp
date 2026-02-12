@@ -290,6 +290,8 @@ int main(int argc, char *argv[]) {
          double fps = session->frames_sent.load() / uptime;
          double bitrate_kbps =
              (session->bytes_sent.load() * 8.0 / 1000.0) / uptime;
+         const auto state = session->state.load();
+         const auto reason = session->teardown_reason.load();
 
          res.status = 200;
          res.set_content("{"
@@ -318,8 +320,20 @@ int main(int argc, char *argv[]) {
                              "\"quality\":" +
                              std::to_string(session->params.quality) +
                              ","
+                             "\"state\":\"" +
+                             std::string(session_state_label(state)) +
+                             "\","
+                             "\"teardown_reason\":\"" +
+                             std::string(teardown_reason_label(reason)) +
+                             "\","
                              "\"active_clients\":" +
                              std::to_string(session->client_count.load()) +
+                             ","
+                             "\"startup_ms\":" +
+                             std::to_string(session->startup_ms.load()) +
+                             ","
+                             "\"first_frame_ms\":" +
+                             std::to_string(session->first_frame_ms.load()) +
                              ","
                              "\"fps_out\":" +
                              std::to_string(fps) +
@@ -399,6 +413,16 @@ int main(int argc, char *argv[]) {
          auto session = sessions.get_or_create(device_id, params);
          session->client_count.fetch_add(1);
          session->last_accessed = std::chrono::steady_clock::now();
+         session->state.store(SessionState::Live);
+         session->teardown_reason.store(TeardownReason::None);
+
+         auto detach_client = [session, device_id, &sessions]() {
+           const int prev = session->client_count.fetch_sub(1);
+           if (prev <= 1) {
+             session->client_count.store(0);
+           }
+           sessions.release_if_idle(device_id);
+         };
 
          EffectiveParams eff{params, session->params};
          eff.actual.container = params.container;
@@ -411,32 +435,39 @@ int main(int argc, char *argv[]) {
            res.set_content(stream::build_error_json(
                                "conflict", "params locked by first requester"),
                            "application/json");
-           session->client_count.fetch_sub(1);
-           sessions.release_if_idle(device_id);
+           detach_client();
            return;
          }
 
-         auto on_done = [device_id, &sessions](bool) {
-           auto session_opt = sessions.find(device_id);
-           if (session_opt) {
-             (*session_opt)->client_count.fetch_sub(1);
-             sessions.release_if_idle(device_id);
-           }
+         auto on_done = [detach_client](bool) {
+           detach_client();
          };
 
          if (!session->capture->running()) {
+           session->state.store(SessionState::Warming);
+           const auto warming_started_at = std::chrono::steady_clock::now();
            if (!session->capture->start(device_id, session->params)) {
              res.status = 503;
              res.set_content(stream::build_error_json("device_unavailable",
                                                       "failed to open camera"),
                              "application/json");
-             session->client_count.fetch_sub(1);
+             session->state.store(SessionState::Idle);
+             session->teardown_reason.store(TeardownReason::OpenFailed);
+             detach_client();
              return;
            }
            stream::sync_session_params(*session);
            session->started = std::chrono::steady_clock::now();
            session->frames_sent = 0;
            session->bytes_sent = 0;
+           session->startup_ms.store(static_cast<uint64_t>(
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+                   session->started - warming_started_at)
+                   .count()));
+           session->first_frame_ms.store(0);
+           session->first_frame_marked.store(false);
+           session->state.store(SessionState::Live);
+           session->teardown_reason.store(TeardownReason::None);
          }
 
          EffectiveParams eff_actual{params, session->params};
@@ -454,8 +485,8 @@ int main(int argc, char *argv[]) {
                res.set_content(
                    stream::build_error_json("fmp4_unavailable", error),
                    "application/json");
-               session->client_count.fetch_sub(1);
-               sessions.release_if_idle(device_id);
+               session->teardown_reason.store(TeardownReason::RuntimeError);
+               detach_client();
                return;
              }
              stream::serve_fmp4_live(session->params, res, session, on_done);
@@ -468,8 +499,8 @@ int main(int argc, char *argv[]) {
                                "internal_error",
                                "validated codec missing runtime handler"),
                            "application/json");
-           session->client_count.fetch_sub(1);
-           sessions.release_if_idle(device_id);
+           session->teardown_reason.store(TeardownReason::RuntimeError);
+           detach_client();
          }
        }});
 
@@ -505,10 +536,29 @@ int main(int argc, char *argv[]) {
            return;
          }
          const std::string target = req.get_param_value("target");
-         int port = std::stoi(req.get_param_value("port"));
-         int duration_sec = req.has_param("duration")
-                                ? std::stoi(req.get_param_value("duration"))
-                                : 10;
+         int port = 0;
+         int duration_sec = 10;
+         try {
+           port = std::stoi(req.get_param_value("port"));
+           if (req.has_param("duration")) {
+             duration_sec = std::stoi(req.get_param_value("duration"));
+           }
+         } catch (...) {
+           res.status = 400;
+           res.set_content(
+               stream::build_error_json("bad_request",
+                                        "port and duration must be integers"),
+               "application/json");
+           return;
+         }
+         if (port <= 0 || port > 65535 || duration_sec <= 0) {
+           res.status = 400;
+           res.set_content(
+               stream::build_error_json("bad_request",
+                                        "port must be 1-65535 and duration > 0"),
+               "application/json");
+           return;
+         }
          CaptureParams params;
          std::string parse_error_json;
          if (!stream::parse_params(req, params, parse_error_json)) {
@@ -531,6 +581,16 @@ int main(int argc, char *argv[]) {
          auto session = sessions.get_or_create(device_id, params);
          session->client_count.fetch_add(1);
          session->last_accessed = std::chrono::steady_clock::now();
+         session->state.store(SessionState::Live);
+         session->teardown_reason.store(TeardownReason::None);
+
+         auto detach_client = [session, device_id, &sessions]() {
+           const int prev = session->client_count.fetch_sub(1);
+           if (prev <= 1) {
+             session->client_count.store(0);
+           }
+           sessions.release_if_idle(device_id);
+         };
 
          if (params.media != session->params.media ||
              params.codec != session->params.codec ||
@@ -539,32 +599,43 @@ int main(int argc, char *argv[]) {
            res.set_content(stream::build_error_json(
                                "conflict", "params locked by first requester"),
                            "application/json");
-           session->client_count.fetch_sub(1);
-           sessions.release_if_idle(device_id);
+           detach_client();
            return;
          }
 
          if (!session->capture->running()) {
+           session->state.store(SessionState::Warming);
+           const auto warming_started_at = std::chrono::steady_clock::now();
            if (!session->capture->start(device_id, session->params)) {
              res.status = 503;
              res.set_content(stream::build_error_json("device_unavailable",
                                                       "failed to open camera"),
                              "application/json");
-             session->client_count.fetch_sub(1);
+             session->state.store(SessionState::Idle);
+             session->teardown_reason.store(TeardownReason::OpenFailed);
+             detach_client();
              return;
            }
            stream::sync_session_params(*session);
            session->started = std::chrono::steady_clock::now();
            session->frames_sent = 0;
            session->bytes_sent = 0;
+           session->startup_ms.store(static_cast<uint64_t>(
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+                   session->started - warming_started_at)
+                   .count()));
+           session->first_frame_ms.store(0);
+           session->first_frame_marked.store(false);
+           session->state.store(SessionState::Live);
+           session->teardown_reason.store(TeardownReason::None);
          }
 
          std::thread([session, params, target, port, duration_sec,
-                      &sessions]() {
+                      detach_client]() {
            int sock = socket(AF_INET, SOCK_DGRAM, 0);
            if (sock < 0) {
-             session->client_count.fetch_sub(1);
-             sessions.release_if_idle(session->device_id);
+             session->teardown_reason.store(TeardownReason::RuntimeError);
+             detach_client();
              return;
            }
            sockaddr_in addr{};
@@ -572,8 +643,8 @@ int main(int argc, char *argv[]) {
            addr.sin_port = htons(port);
            if (inet_pton(AF_INET, target.c_str(), &addr.sin_addr) != 1) {
              close(sock);
-             session->client_count.fetch_sub(1);
-             sessions.release_if_idle(session->device_id);
+             session->teardown_reason.store(TeardownReason::RuntimeError);
+             detach_client();
              return;
            }
 
@@ -708,16 +779,14 @@ int main(int argc, char *argv[]) {
                  session->bytes_sent.fetch_add(packet.size());
                  offset += chunk;
                }
-               session->frames_sent.fetch_add(1);
+               stream::note_frame_sent(*session, 0);
                frame_sequence++;
              }
-             session->last_accessed = std::chrono::steady_clock::now();
              std::this_thread::sleep_for(
                  std::chrono::milliseconds(frame_interval_ms));
            }
            close(sock);
-           session->client_count.fetch_sub(1);
-           sessions.release_if_idle(session->device_id);
+           detach_client();
          }).detach();
 
          res.status = 200;

@@ -487,6 +487,23 @@ void add_effective_headers(httplib::Response &res, const EffectiveParams &eff) {
           ";container=" + a.container);
 }
 
+void note_frame_sent(Session &session, size_t bytes) {
+  session.frames_sent.fetch_add(1);
+  if (bytes > 0) {
+    session.bytes_sent.fetch_add(bytes);
+  }
+  session.last_accessed = std::chrono::steady_clock::now();
+  if (!session.first_frame_marked.exchange(true)) {
+    const auto delta_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - session.started)
+            .count();
+    if (delta_ms >= 0) {
+      session.first_frame_ms.store(static_cast<uint64_t>(delta_ms));
+    }
+  }
+}
+
 void serve_mjpeg_placeholder(const CaptureParams &p, httplib::Response &res,
                              std::shared_ptr<Session> session,
                              std::function<void(bool)> on_done) {
@@ -508,9 +525,7 @@ void serve_mjpeg_placeholder(const CaptureParams &p, httplib::Response &res,
             return false;
           if (!sink.write("\r\n", 2))
             return false;
-          session->frames_sent.fetch_add(1);
-          session->bytes_sent.fetch_add(prefix.size() + sizeof(kTinyJpeg) + 2);
-          session->last_accessed = std::chrono::steady_clock::now();
+          note_frame_sent(*session, prefix.size() + sizeof(kTinyJpeg) + 2);
           std::this_thread::sleep_for(
               std::chrono::milliseconds(frame_interval_ms));
         }
@@ -549,9 +564,7 @@ void serve_mjpeg_live(const CaptureParams &p, httplib::Response &res,
             return false;
           if (!sink.write("\r\n", 2))
             return false;
-          session->frames_sent.fetch_add(1);
-          session->bytes_sent.fetch_add(prefix.size() + frame.size() + 2);
-          session->last_accessed = std::chrono::steady_clock::now();
+          note_frame_sent(*session, prefix.size() + frame.size() + 2);
           std::this_thread::sleep_for(
               std::chrono::milliseconds(frame_interval_ms));
         }
@@ -637,15 +650,13 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
           if (!nal.empty()) {
             if (passthrough) {
               if (!sink.write(nal.data(), nal.size())) return false;
-              session->bytes_sent.fetch_add(nal.size());
+              note_frame_sent(*session, nal.size());
             } else {
               static const char start_code[] = {0, 0, 0, 1};
               if (!sink.write(start_code, 4)) return false;
               if (!sink.write(nal.data(), nal.size())) return false;
-              session->bytes_sent.fetch_add(4 + nal.size());
+              note_frame_sent(*session, 4 + nal.size());
             }
-            session->frames_sent.fetch_add(1);
-            session->last_accessed = std::chrono::steady_clock::now();
           }
           std::this_thread::sleep_for(
               std::chrono::milliseconds(frame_interval_ms));
@@ -791,9 +802,7 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
           if (!sink.write(frag.data(), frag.size()))
             return false;
 
-          session->frames_sent.fetch_add(1);
-          session->bytes_sent.fetch_add(frag.size());
-          session->last_accessed = std::chrono::steady_clock::now();
+          note_frame_sent(*session, frag.size());
           std::this_thread::sleep_for(
               std::chrono::milliseconds(1000 / std::max(1, p.fps)));
         }

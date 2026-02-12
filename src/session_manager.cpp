@@ -61,6 +61,9 @@ void SessionManager::release_if_idle(const std::string &device_id) {
   auto it = sessions_.find(device_id);
   if (it != sessions_.end()) {
     if (it->second->client_count.load() == 0) {
+      if (it->second->capture && it->second->capture->running()) {
+        it->second->state.store(SessionState::Draining);
+      }
       // Preserve short-gap session reuse; let the reaper own teardown timing.
       it->second->last_accessed = std::chrono::steady_clock::now();
     }
@@ -123,8 +126,14 @@ void SessionManager::reap_loop() {
                             .count();
         if (sess->client_count.load() == 0 &&
             idle_for > idle_timeout_seconds_) {
-          if (sess->capture)
+          if (sess->capture) {
             sess->capture->stop();
+          }
+          sess->state.store(SessionState::Idle);
+          sess->teardown_reason.store(TeardownReason::IdleTimeout);
+          std::cout << "[reaper] device=" << sess->device_id
+                    << " state=idle reason=idle_timeout idle_for_s=" << idle_for
+                    << std::endl;
           it = sessions_.erase(it);
         } else {
           ++it;

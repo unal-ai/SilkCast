@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
 void apply_latency_preset(CaptureParams &p);
 void sync_session_params(Session &session);
 void add_effective_headers(httplib::Response &res, const EffectiveParams &eff);
+void note_frame_sent(Session &session, size_t bytes);
 
 // Bitstream helpers
 std::vector<uint8_t> annexb_to_avcc(const std::string &annexb);
