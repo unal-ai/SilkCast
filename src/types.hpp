@@ -80,7 +80,9 @@ struct Session {
   std::atomic<uint64_t> bytes_sent{0};
   std::atomic<uint64_t> startup_ms{0};
   std::atomic<uint64_t> first_frame_ms{0};
+  std::atomic<uint64_t> first_iframe_ms{0};
   std::atomic<bool> first_frame_marked{false};
+  std::atomic<bool> first_iframe_marked{false};
   std::atomic<uint32_t> idr_request_seq{0};
 };
 

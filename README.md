@@ -63,6 +63,9 @@ Override behavior with environment variables:
 ### RTSP smoke test (optional local validation)
 `scripts/rtsp_smoke.sh` spins up `mediamtx` + a synthetic RTSP publisher (`ffmpeg`), starts SilkCast, requests encoded RTSP relay over fMP4, and validates `ftyp` output.
 
+### API smoke test (fast contract check)
+`scripts/smoke_api.sh` validates key HTTP contracts (`/system/info`, `/capabilities`, bad-param `400`, WebSocket placeholder behavior, encoded RTSP route + stats lifecycle fields).
+
 ### Requirements
 - Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging. Non-Linux builds compile but camera capture stubs out.
 - No Docker required; single binary.

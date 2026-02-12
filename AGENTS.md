@@ -173,6 +173,11 @@ Example:
   - **Rollback:** Restore previous control endpoints and disable lazy GET activation in router/session manager.
 
 Entries:
+- `[2026-02-12] [Codex] [First-IFrame Metric + API Smoke Script]`
+  - **What changed:** Added `first_iframe_ms` tracking to session metrics (H.264 paths only) and exposed it in `/stream/{id}/stats`; added `scripts/smoke_api.sh` to verify core HTTP contracts (health/capabilities, bad-param errors, WS placeholder behavior, encoded RTSP route + lifecycle stats fields).
+  - **Why:** Improve startup observability for decode-readiness and make regression checks repeatable with a single command.
+  - **Impact:** Teams can now distinguish first-byte vs first-I-frame timing and quickly catch API drift before merge.
+  - **Rollback:** Revert `src/types.hpp`, `src/stream_utils.*`, `src/main.cpp`, `scripts/smoke_api.sh`, and related README/AGENTS notes.
 - `[2026-02-12] [Codex] [Session State Machine + Teardown Reason]`
   - **What changed:** Added explicit session lifecycle enums (`idle/warming/live/draining`) and teardown reasons (`none/idle_timeout/open_failed/runtime_error`) in `src/types.hpp`; wired transitions through live/udp attach-detach flow and reaper cleanup; added startup and first-frame timing counters to session stats; centralized per-frame accounting via `stream::note_frame_sent`.
   - **Why:** Make concurrency and cleanup behavior observable and deterministic, and remove implicit state guesses during debugging.
@@ -277,7 +282,7 @@ Entries:
 - CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).
 - Packaging: `scripts/build_linux.sh` for amd64/arm64; systemd unit at `packaging/systemd/silkcast.service`. Non-Linux builds stub capture.
 - I420 conversion is foundational; keep a fast YUYV→I420 path and avoid buffering (“latest frame only”) for preview/tele-op use. 
-- Stats: `/stream/{id}/stats` returns fps/bitrate estimates plus lifecycle/debug fields (`state`, `teardown_reason`, `startup_ms`, `first_frame_ms`) based on session counters and transitions; session tracks frames/bytes/clients and resets counters on first start. IDR forced on client join for H.264.
+- Stats: `/stream/{id}/stats` returns fps/bitrate estimates plus lifecycle/debug fields (`state`, `teardown_reason`, `startup_ms`, `first_frame_ms`, `first_iframe_ms`) based on session counters and transitions; session tracks frames/bytes/clients and resets counters on first start. IDR forced on client join for H.264.
 - WebSocket: current `cpp-httplib v0.15.x` build exposes `/stream/ws` and `/stream/ws/{id}` as explicit `501 not_implemented` placeholders; binary WS streaming is reserved for a websocket-capable server build.
 - UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends fragmented packets with a custom binary header `[frame_id:4][frag_id:2][num_frags:2][data_size:4]` + payload. This enables robust reassembly and frame recovery on the client side.
 - Feedback Loop: `POST /stream/{id}/feedback?type=idr` allows clients to request Instant Decoder Refresh (critical for H.264 packet loss recovery).

@@ -335,6 +335,9 @@ int main(int argc, char *argv[]) {
                              "\"first_frame_ms\":" +
                              std::to_string(session->first_frame_ms.load()) +
                              ","
+                             "\"first_iframe_ms\":" +
+                             std::to_string(session->first_iframe_ms.load()) +
+                             ","
                              "\"fps_out\":" +
                              std::to_string(fps) +
                              ","
@@ -466,6 +469,8 @@ int main(int argc, char *argv[]) {
                    .count()));
            session->first_frame_ms.store(0);
            session->first_frame_marked.store(false);
+           session->first_iframe_ms.store(0);
+           session->first_iframe_marked.store(false);
            session->state.store(SessionState::Live);
            session->teardown_reason.store(TeardownReason::None);
          }
@@ -626,6 +631,8 @@ int main(int argc, char *argv[]) {
                    .count()));
            session->first_frame_ms.store(0);
            session->first_frame_marked.store(false);
+           session->first_iframe_ms.store(0);
+           session->first_iframe_marked.store(false);
            session->state.store(SessionState::Live);
            session->teardown_reason.store(TeardownReason::None);
          }

@@ -353,6 +353,35 @@ void extract_sps_pps(const std::string &annexb, std::vector<uint8_t> &sps,
   }
 }
 
+bool contains_idr(const std::string &bitstream) {
+  if (bitstream.empty()) return false;
+
+  auto is_start_code = [&bitstream](size_t pos) {
+    return pos + 2 < bitstream.size() && bitstream[pos] == 0 &&
+           bitstream[pos + 1] == 0 &&
+           (bitstream[pos + 2] == 1 ||
+            (bitstream[pos + 2] == 0 && pos + 3 < bitstream.size() &&
+             bitstream[pos + 3] == 1));
+  };
+
+  bool saw_start_code = false;
+  for (size_t i = 0; i + 3 < bitstream.size(); ++i) {
+    if (!is_start_code(i)) continue;
+    saw_start_code = true;
+    const size_t sc = (bitstream[i + 2] == 1) ? 3 : 4;
+    const size_t nal_pos = i + sc;
+    if (nal_pos >= bitstream.size()) break;
+    const uint8_t nal_type = static_cast<uint8_t>(bitstream[nal_pos]) & 0x1F;
+    if (nal_type == 5) return true;
+  }
+
+  if (!saw_start_code) {
+    const uint8_t nal_type = static_cast<uint8_t>(bitstream[0]) & 0x1F;
+    return nal_type == 5;
+  }
+  return false;
+}
+
 namespace {
 std::string build_param_error_json(const std::string &field,
                                    const std::string &value,
@@ -487,7 +516,7 @@ void add_effective_headers(httplib::Response &res, const EffectiveParams &eff) {
           ";container=" + a.container);
 }
 
-void note_frame_sent(Session &session, size_t bytes) {
+void note_frame_sent(Session &session, size_t bytes, bool is_iframe) {
   session.frames_sent.fetch_add(1);
   if (bytes > 0) {
     session.bytes_sent.fetch_add(bytes);
@@ -500,6 +529,17 @@ void note_frame_sent(Session &session, size_t bytes) {
             .count();
     if (delta_ms >= 0) {
       session.first_frame_ms.store(static_cast<uint64_t>(delta_ms));
+    }
+  }
+
+  if (session.params.codec == "h264" && is_iframe &&
+      !session.first_iframe_marked.exchange(true)) {
+    const auto delta_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - session.started)
+            .count();
+    if (delta_ms >= 0) {
+      session.first_iframe_ms.store(static_cast<uint64_t>(delta_ms));
     }
   }
 }
@@ -648,14 +688,15 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
             }
           }
           if (!nal.empty()) {
+            const bool keyframe = contains_idr(nal);
             if (passthrough) {
               if (!sink.write(nal.data(), nal.size())) return false;
-              note_frame_sent(*session, nal.size());
+              note_frame_sent(*session, nal.size(), keyframe);
             } else {
               static const char start_code[] = {0, 0, 0, 1};
               if (!sink.write(start_code, 4)) return false;
               if (!sink.write(nal.data(), nal.size())) return false;
-              note_frame_sent(*session, 4 + nal.size());
+              note_frame_sent(*session, 4 + nal.size(), keyframe);
             }
           }
           std::this_thread::sleep_for(
@@ -778,23 +819,7 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
           }
           auto avcc = annexb_to_avcc(nal_annexb);
 
-          // Keyframe scan: find NAL type 5 in Annex-B sequence.
-          bool keyframe = false;
-          for (size_t i = 0; i + 4 < nal_annexb.size(); ++i) {
-            if (nal_annexb[i] == 0 && nal_annexb[i + 1] == 0 &&
-                nal_annexb[i + 2] == 0 && nal_annexb[i + 3] == 1) {
-              if ((static_cast<uint8_t>(nal_annexb[i + 4]) & 0x1F) == 5) {
-                keyframe = true;
-                break;
-              }
-            } else if (i + 3 < nal_annexb.size() && nal_annexb[i] == 0 &&
-                       nal_annexb[i + 1] == 0 && nal_annexb[i + 2] == 1) {
-              if ((static_cast<uint8_t>(nal_annexb[i + 3]) & 0x1F) == 5) {
-                keyframe = true;
-                break;
-              }
-            }
-          }
+          const bool keyframe = contains_idr(nal_annexb);
 
           auto frag = mux->build_fragment(avcc, seqno++, decode_time,
                                           sample_duration, keyframe);
@@ -802,7 +827,7 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
           if (!sink.write(frag.data(), frag.size()))
             return false;
 
-          note_frame_sent(*session, frag.size());
+          note_frame_sent(*session, frag.size(), keyframe);
           std::this_thread::sleep_for(
               std::chrono::milliseconds(1000 / std::max(1, p.fps)));
         }
