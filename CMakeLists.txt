@@ -93,8 +93,11 @@ set(SILKCAST_SOURCES
   src/adapter_registry.cpp
   src/adapter_registry.hpp
   src/types.hpp
+  src/capture_interface.hpp
   src/capture_v4l2.cpp
   src/capture_v4l2.hpp
+  src/capture_rtsp.cpp
+  src/capture_rtsp.hpp
   src/session_manager.cpp
   src/session_manager.hpp
   src/stream_utils.cpp

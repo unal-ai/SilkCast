@@ -179,6 +179,21 @@ int main(int argc, char *argv[]) {
                        "application/json");
                  }});
 
+  api.add_route({"/system/info",
+                 "GET",
+                 "Get basic server info",
+                 {},
+                 [&cfg](const httplib::Request &, httplib::Response &res) {
+                   res.status = 200;
+                   res.set_content(
+                       "{"
+                       "\"ip\":\"" + stream::get_local_ip_address() + "\","
+                       "\"port\":" + std::to_string(cfg.port) + ","
+                       "\"version\":\"1.0\""
+                       "}",
+                       "application/json");
+                 }});
+
   api.add_route({"/stream/ws/{device}",
                  "GET",
                  "WebSocket stream placeholder (requires WS-capable server)",
@@ -203,7 +218,7 @@ int main(int argc, char *argv[]) {
            res.status = 404;
            return;
          }
-         std::string device_id = req.matches[1].str();
+         std::string device_id = stream::url_decode(req.matches[1].str());
          sessions.touch(device_id);
 #ifdef __linux__
          std::string error;
@@ -238,7 +253,7 @@ int main(int argc, char *argv[]) {
            res.status = 404;
            return;
          }
-         std::string device_id = req.matches[1].str();
+         std::string device_id = stream::url_decode(req.matches[1].str());
          auto session_opt = sessions.find(device_id);
          if (!session_opt) {
            res.status = 404;
@@ -341,14 +356,17 @@ int main(int argc, char *argv[]) {
            res.status = 404;
            return;
          }
-         std::string device_id = req.matches[1].str();
+         std::string device_id = stream::url_decode(req.matches[1].str());
+         bool is_rtsp = device_id.rfind("rtsp://", 0) == 0;
          auto params = stream::parse_params(req);
-         if (params.media.empty())
+         if (!req.has_param("media"))
            params.media = "video";
-         if (params.codec.empty())
-           params.codec = cfg.default_codec;
-         if (params.container.empty())
-           params.container = "raw";
+         if (!req.has_param("codec"))
+           params.codec = is_rtsp ? "h264" : cfg.default_codec;
+         if (!req.has_param("container"))
+           params.container = is_rtsp ? "mp4" : "raw";
+         if (!req.has_param("latency") && is_rtsp)
+           params.latency = "ultra";
          if (!validate_media_params(adapters, params.media, "live", res))
            return;
          if (!validate_transport_params(registry, params, TransportKind::Live,
@@ -455,7 +473,7 @@ int main(int argc, char *argv[]) {
            res.status = 404;
            return;
          }
-         std::string device_id = req.matches[1].str();
+         std::string device_id = stream::url_decode(req.matches[1].str());
          if (!req.has_param("target") || !req.has_param("port")) {
            res.status = 400;
            res.set_content(stream::build_error_json(
@@ -469,11 +487,11 @@ int main(int argc, char *argv[]) {
                                 ? std::stoi(req.get_param_value("duration"))
                                 : 10;
          auto params = stream::parse_params(req);
-         if (params.media.empty())
+         if (!req.has_param("media"))
            params.media = "video";
-         if (params.codec.empty())
+         if (!req.has_param("codec"))
            params.codec = "h264";
-         if (params.container.empty())
+         if (!req.has_param("container"))
            params.container = "raw";
          if (!validate_media_params(adapters, params.media, "udp", res))
            return;
@@ -698,7 +716,7 @@ int main(int argc, char *argv[]) {
            res.status = 404;
            return;
          }
-         std::string device_id = req.matches[1].str();
+         std::string device_id = stream::url_decode(req.matches[1].str());
          auto session_opt = sessions.find(device_id);
          if (!session_opt) {
            res.status = 404;
@@ -724,6 +742,8 @@ int main(int argc, char *argv[]) {
 
   api.register_with(svr);
 
+  std::cout << "SilkCast server detected IP: " << stream::get_local_ip_address()
+            << std::endl;
   std::cout << "SilkCast server listening on " << cfg.addr << ":" << cfg.port
             << " (idle-timeout=" << cfg.idle_timeout << "s)" << std::endl;
   svr.listen(cfg.addr.c_str(), cfg.port);

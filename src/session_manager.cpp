@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <iostream>
 
+#include "capture_rtsp.hpp"
+
 #ifdef __APPLE__
 std::vector<std::string> list_avfoundation_devices();
 #endif
@@ -37,7 +39,11 @@ SessionManager::get_or_create(const std::string &device_id,
   auto session = std::make_shared<Session>();
   session->device_id = device_id;
   session->params = params;
-  session->capture = std::make_shared<CaptureV4L2>();
+  if (device_id.rfind("rtsp://", 0) == 0) {
+    session->capture = std::make_shared<CaptureRTSP>();
+  } else {
+    session->capture = std::make_shared<CaptureV4L2>();
+  }
   sessions_[device_id] = session;
   return session;
 }

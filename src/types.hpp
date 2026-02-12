@@ -20,7 +20,7 @@ struct CaptureParams {
   std::string container = "raw"; // raw | mp4 (fMP4)
 };
 
-enum class PixelFormat { MJPEG, YUYV, NV12, UNKNOWN };
+enum class PixelFormat { MJPEG, YUYV, NV12, H264, UNKNOWN };
 
 struct EffectiveParams {
   CaptureParams requested;
@@ -30,7 +30,7 @@ struct EffectiveParams {
 struct Session {
   std::string device_id;
   CaptureParams params;
-  std::shared_ptr<class CaptureV4L2> capture;
+  std::shared_ptr<class CaptureInterface> capture;
   std::shared_ptr<class H264Encoder> encoder;
   std::vector<uint8_t> sps;
   std::vector<uint8_t> pps;

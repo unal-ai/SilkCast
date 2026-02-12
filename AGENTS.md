@@ -173,6 +173,11 @@ Example:
   - **Rollback:** Restore previous control endpoints and disable lazy GET activation in router/session manager.
 
 Entries:
+- `[2026-02-12] [Codex] [RTSP Relay Integration]`
+  - **What changed:** Integrated RTSP ingest path into shared sessions (`CaptureRTSP` + `CaptureInterface`), enabled `rtsp_ingest` adapter registration, added URL-decoded device handling for stream routes, and added `/system/info` plus RTSP relay smoke script `scripts/rtsp_smoke.sh`.
+  - **Why:** Make RTSP a first-class input adapter under the same lazy-start/refcount session model while preventing route mismatch for URL-encoded RTSP IDs.
+  - **Impact:** `GET /stream/live/{id}` now accepts encoded RTSP IDs (for example `rtsp%3A%2F%2F...`) and reaches the capture path instead of returning route-level `404`; capabilities snapshot now advertises RTSP ingest readiness; teams get a repeatable local relay smoke test.
+  - **Rollback:** Revert `src/capture_interface.hpp`, `src/capture_rtsp.*`, `src/session_manager.cpp`, `src/main.cpp`, `src/stream_utils.*`, `src/api_router.hpp`, `src/types.hpp`, `src/adapter_registry.cpp`, `CMakeLists.txt`, and `scripts/rtsp_smoke.sh`.
 - `[2026-02-12] [Codex] [AGENTS Governance]`
   - **What changed:** Added onboarding TL;DR, explicit stage goals/non-goals, prioritized roadmap with per-priority DoD, and mandatory change-log template.
   - **Why:** Improve onboarding speed and make execution order, acceptance criteria, and rollback discipline explicit for all contributors.
@@ -256,6 +261,7 @@ Entries:
 
 ## 8. Implementation Notes (Current)
 - Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264` → YUYV (converted to I420).
+- RTSP input is supported via URL device IDs (`rtsp://...` encoded in path); RTSP sessions use H.264 pass-through where possible and reuse the same lazy session map/refcount cleanup semantics.
 - H.264 encoding via optional OpenH264 (Cisco binary recommended for patent coverage); Annex-B NALs streamed over HTTP chunked.
 - MJPEG and H.264 share lazy sessions; codec mismatches return 409 with `Effective-Params`.
 - CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "capture_interface.hpp"
+
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -7,22 +9,26 @@
 #include <string>
 #include <thread>
 
-#include "types.hpp"
-
 #ifdef __linux__
-class CaptureV4L2 {
+class CaptureV4L2 : public CaptureInterface {
 public:
   CaptureV4L2() = default;
-  ~CaptureV4L2();
+  ~CaptureV4L2() override;
 
-  bool start(const std::string &device_id, const CaptureParams &params);
-  void stop();
-  bool running() const { return running_; }
-  bool latest_frame(std::string &out);
-  PixelFormat pixel_format() const { return pixel_format_; }
-  int width() const { return params_.width; }
-  int height() const { return params_.height; }
-  int fps() const { return params_.fps; }
+  bool start(const std::string &device_id,
+             const CaptureParams &params) override;
+  void stop() override;
+  bool running() const override { return running_; }
+  bool latest_frame(std::string &out) override;
+  PixelFormat pixel_format() const override { return pixel_format_; }
+  int width() const override { return params_.width; }
+  int height() const override { return params_.height; }
+  int fps() const override { return params_.fps; }
+  void get_sps_pps(std::vector<uint8_t> &sps,
+                   std::vector<uint8_t> &pps) override {
+    sps.clear();
+    pps.clear();
+  }
 
 private:
   void loop();
@@ -54,19 +60,25 @@ private:
   size_t frame_size_ = 0;
 };
 #elif defined(__APPLE__)
-class CaptureV4L2 {
+class CaptureV4L2 : public CaptureInterface {
 public:
   CaptureV4L2();
-  ~CaptureV4L2();
+  ~CaptureV4L2() override;
 
-  bool start(const std::string &device_id, const CaptureParams &params);
-  void stop();
-  bool running() const { return running_; }
-  bool latest_frame(std::string &out);
-  PixelFormat pixel_format() const { return pixel_format_; }
-  int width() const { return params_.width; }
-  int height() const { return params_.height; }
-  int fps() const { return params_.fps; }
+  bool start(const std::string &device_id,
+             const CaptureParams &params) override;
+  void stop() override;
+  bool running() const override { return running_; }
+  bool latest_frame(std::string &out) override;
+  PixelFormat pixel_format() const override { return pixel_format_; }
+  int width() const override { return params_.width; }
+  int height() const override { return params_.height; }
+  int fps() const override { return params_.fps; }
+  void get_sps_pps(std::vector<uint8_t> &sps,
+                   std::vector<uint8_t> &pps) override {
+    sps.clear();
+    pps.clear();
+  }
   void handle_sample(void *sample_buffer);
 
 private:
@@ -82,15 +94,22 @@ private:
 };
 #else
 // Non-Linux stub to keep buildable on macOS/Windows during development.
-class CaptureV4L2 {
+class CaptureV4L2 : public CaptureInterface {
 public:
-  bool start(const std::string &, const CaptureParams &) { return false; }
-  void stop() {}
-  bool running() const { return false; }
-  bool latest_frame(std::string &) { return false; }
-  PixelFormat pixel_format() const { return PixelFormat::UNKNOWN; }
-  int width() const { return 0; }
-  int height() const { return 0; }
-  int fps() const { return 0; }
+  bool start(const std::string &, const CaptureParams &) override {
+    return false;
+  }
+  void stop() override {}
+  bool running() const override { return false; }
+  bool latest_frame(std::string &) override { return false; }
+  PixelFormat pixel_format() const override { return PixelFormat::UNKNOWN; }
+  int width() const override { return 0; }
+  int height() const override { return 0; }
+  int fps() const override { return 0; }
+  void get_sps_pps(std::vector<uint8_t> &sps,
+                   std::vector<uint8_t> &pps) override {
+    sps.clear();
+    pps.clear();
+  }
 };
 #endif

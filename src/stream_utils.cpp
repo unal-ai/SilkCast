@@ -4,10 +4,19 @@
 #include <cerrno>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <thread>
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#endif
 
 #include "api_router.hpp"
 #include "capture_v4l2.hpp"
@@ -65,9 +74,56 @@ const char *pixel_format_label(PixelFormat fmt) {
     return "yuyv";
   case PixelFormat::NV12:
     return "nv12";
+  case PixelFormat::H264:
+    return "h264";
   default:
     return "unknown";
   }
+}
+
+std::string url_decode(const std::string &in) {
+  std::string out;
+  out.reserve(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (in[i] == '%' && i + 2 < in.size()) {
+      int v = 0;
+      std::istringstream iss(in.substr(i + 1, 2));
+      if (iss >> std::hex >> v) {
+        out.push_back(static_cast<char>(v));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(in[i] == '+' ? ' ' : in[i]);
+  }
+  return out;
+}
+
+std::string get_local_ip_address() {
+#if defined(__linux__) || defined(__APPLE__)
+  struct ifaddrs *ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) != 0) return "127.0.0.1";
+
+  std::string ip = "127.0.0.1";
+  for (struct ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (!ifa->ifa_addr) continue;
+    if (ifa->ifa_addr->sa_family != AF_INET) continue;
+    if ((ifa->ifa_flags & IFF_LOOPBACK) != 0) continue;
+
+    char host[NI_MAXHOST] = {0};
+    int rc = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                         NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+    if (rc == 0) {
+      ip = host;
+      break;
+    }
+  }
+
+  freeifaddrs(ifaddr);
+  return ip;
+#else
+  return "127.0.0.1";
+#endif
 }
 
 #ifdef __linux__
@@ -456,8 +512,11 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
       "video/H264",
       [p, session](size_t, httplib::DataSink &sink) mutable {
         H264Encoder encoder;
-        bool encoder_ready = false;
-        if (!encoder_ready) {
+        bool passthrough =
+            session->capture &&
+            session->capture->pixel_format() == PixelFormat::H264;
+        bool encoder_ready = passthrough;
+        if (!passthrough) {
           if (!encoder.init(session->params)) {
             return false;
           }
@@ -468,7 +527,7 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
         const int uv_size = (p.width / 2) * (p.height / 2);
         std::string frame;
         std::string yuv;
-        yuv.resize(y_size + 2 * uv_size);
+        if (!passthrough) yuv.resize(y_size + 2 * uv_size);
         uint8_t *y = reinterpret_cast<uint8_t *>(yuv.data());
         uint8_t *u = y + y_size;
         uint8_t *v = u + uv_size;
@@ -482,43 +541,52 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
             continue;
           }
           PixelFormat fmt = session->capture->pixel_format();
-          if ((fmt != PixelFormat::YUYV && fmt != PixelFormat::NV12) ||
+          passthrough = (fmt == PixelFormat::H264);
+          if ((!passthrough && fmt != PixelFormat::YUYV &&
+               fmt != PixelFormat::NV12) ||
               !session->capture->latest_frame(frame)) {
             std::this_thread::sleep_for(10ms);
             continue;
           }
-          if (fmt == PixelFormat::YUYV) {
-            yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
-                         p.width, p.height, y, u, v);
-          } else {
-            const uint8_t *src_y =
-                reinterpret_cast<const uint8_t *>(frame.data());
-            const uint8_t *src_uv = src_y + (p.width * p.height);
-            nv12_to_i420(src_y, src_uv, p.width, p.height, p.width, p.width, y,
-                         u, v);
-          }
-          if (first) {
-            encoder.force_idr();
-            first = false;
-          }
-          uint32_t current_idr = session->idr_request_seq.load();
-          if (current_idr > last_idr) {
-            encoder.force_idr();
-            last_idr = current_idr;
-          }
           std::string nal;
-          if (!encoder.encode_i420(y, u, v, nal)) {
-            std::this_thread::sleep_for(5ms);
-            continue;
+          if (passthrough) {
+            nal = frame;
+          } else {
+            if (fmt == PixelFormat::YUYV) {
+              yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
+                           p.width, p.height, y, u, v);
+            } else {
+              const uint8_t *src_y =
+                  reinterpret_cast<const uint8_t *>(frame.data());
+              const uint8_t *src_uv = src_y + (p.width * p.height);
+              nv12_to_i420(src_y, src_uv, p.width, p.height, p.width, p.width,
+                           y, u, v);
+            }
+            if (first) {
+              encoder.force_idr();
+              first = false;
+            }
+            uint32_t current_idr = session->idr_request_seq.load();
+            if (current_idr > last_idr) {
+              encoder.force_idr();
+              last_idr = current_idr;
+            }
+            if (!encoder.encode_i420(y, u, v, nal)) {
+              std::this_thread::sleep_for(5ms);
+              continue;
+            }
           }
           if (!nal.empty()) {
-            static const char start_code[] = {0, 0, 0, 1};
-            if (!sink.write(start_code, 4))
-              return false;
-            if (!sink.write(nal.data(), nal.size()))
-              return false;
+            if (passthrough) {
+              if (!sink.write(nal.data(), nal.size())) return false;
+              session->bytes_sent.fetch_add(nal.size());
+            } else {
+              static const char start_code[] = {0, 0, 0, 1};
+              if (!sink.write(start_code, 4)) return false;
+              if (!sink.write(nal.data(), nal.size())) return false;
+              session->bytes_sent.fetch_add(4 + nal.size());
+            }
             session->frames_sent.fetch_add(1);
-            session->bytes_sent.fetch_add(4 + nal.size());
             session->last_accessed = std::chrono::steady_clock::now();
           }
           std::this_thread::sleep_for(
@@ -550,17 +618,20 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
       "video/mp4",
       [p, session, sample_duration](size_t, httplib::DataSink &sink) mutable {
         H264Encoder encoder;
-        if (!encoder.init(session->params))
-          return false;
-        encoder.force_idr();
-        std::vector<uint8_t> sps = session->sps;
-        std::vector<uint8_t> pps = session->pps;
+        bool passthrough =
+            session->capture &&
+            session->capture->pixel_format() == PixelFormat::H264;
+        if (!passthrough) {
+          if (!encoder.init(session->params)) return false;
+          encoder.force_idr();
+        }
+
         uint32_t seqno = 1;
         const int y_size = p.width * p.height;
         const int uv_size = (p.width / 2) * (p.height / 2);
         std::string frame;
         std::string yuv;
-        yuv.resize(y_size + 2 * uv_size);
+        if (!passthrough) yuv.resize(y_size + 2 * uv_size);
         uint8_t *y = reinterpret_cast<uint8_t *>(yuv.data());
         uint8_t *u = y + y_size;
         uint8_t *v = u + uv_size;
@@ -568,14 +639,10 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
         std::unique_ptr<Mp4Fragmenter> mux_guard;
         Mp4Fragmenter *mux = nullptr;
         uint64_t decode_time = 0;
-        if (!sps.empty() && !pps.empty()) {
-          mux_guard = std::make_unique<Mp4Fragmenter>(p.width, p.height, p.fps,
-                                                      sps, pps);
-          mux = mux_guard.get();
-        }
         uint32_t last_idr = session->idr_request_seq.load();
+
         while (true) {
-          if (session->idr_request_seq.load() > last_idr) {
+          if (!passthrough && session->idr_request_seq.load() > last_idr) {
             encoder.force_idr();
             last_idr = session->idr_request_seq.load();
           }
@@ -588,46 +655,78 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
             continue;
           }
           PixelFormat fmt = session->capture->pixel_format();
-          if (fmt != PixelFormat::YUYV && fmt != PixelFormat::NV12) {
+          passthrough = (fmt == PixelFormat::H264);
+          if (!passthrough && fmt != PixelFormat::YUYV &&
+              fmt != PixelFormat::NV12) {
             std::this_thread::sleep_for(5ms);
             continue;
           }
-          if (fmt == PixelFormat::YUYV) {
-            yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
-                         p.width, p.height, y, u, v);
-          } else {
-            const uint8_t *src_y =
-                reinterpret_cast<const uint8_t *>(frame.data());
-            const uint8_t *src_uv = src_y + (p.width * p.height);
-            nv12_to_i420(src_y, src_uv, p.width, p.height, p.width, p.width, y,
-                         u, v);
-          }
+
           std::string nal_annexb;
-          if (!encoder.encode_i420(y, u, v, nal_annexb)) {
-            std::this_thread::sleep_for(5ms);
-            continue;
-          }
-          if (sps.empty() || pps.empty()) {
-            extract_sps_pps(nal_annexb, sps, pps);
-            if (!sps.empty() && !pps.empty()) {
-              session->sps = sps;
-              session->pps = pps;
-              mux_guard = std::make_unique<Mp4Fragmenter>(p.width, p.height,
-                                                          p.fps, sps, pps);
-              mux = mux_guard.get();
+          if (passthrough) {
+            nal_annexb = frame;
+            if (session->sps.empty() || session->pps.empty()) {
+              std::vector<uint8_t> sps;
+              std::vector<uint8_t> pps;
+              session->capture->get_sps_pps(sps, pps);
+              if (!sps.empty() && !pps.empty()) {
+                session->sps = std::move(sps);
+                session->pps = std::move(pps);
+              }
             }
+          } else {
+            if (fmt == PixelFormat::YUYV) {
+              yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
+                           p.width, p.height, y, u, v);
+            } else {
+              const uint8_t *src_y =
+                  reinterpret_cast<const uint8_t *>(frame.data());
+              const uint8_t *src_uv = src_y + (p.width * p.height);
+              nv12_to_i420(src_y, src_uv, p.width, p.height, p.width, p.width,
+                           y, u, v);
+            }
+            if (!encoder.encode_i420(y, u, v, nal_annexb)) {
+              std::this_thread::sleep_for(5ms);
+              continue;
+            }
+          }
+
+          if (session->sps.empty() || session->pps.empty()) {
+            extract_sps_pps(nal_annexb, session->sps, session->pps);
+          }
+          if (!mux && !session->sps.empty() && !session->pps.empty()) {
+            mux_guard = std::make_unique<Mp4Fragmenter>(
+                p.width, p.height, p.fps, session->sps, session->pps);
+            mux = mux_guard.get();
           }
           if (!mux) {
             continue;
           }
           if (!sent_init) {
             auto init_seg = mux->build_init_segment();
-            if (!sink.write(init_seg.data(), init_seg.size()))
-              return false;
+            if (!sink.write(init_seg.data(), init_seg.size())) return false;
             sent_init = true;
           }
           auto avcc = annexb_to_avcc(nal_annexb);
-          bool keyframe = !nal_annexb.empty() && ((nal_annexb[4] & 0x1F) == 5);
+
+          // Keyframe scan: find NAL type 5 in Annex-B sequence.
+          bool keyframe = false;
+          for (size_t i = 0; i + 4 < nal_annexb.size(); ++i) {
+            if (nal_annexb[i] == 0 && nal_annexb[i + 1] == 0 &&
+                nal_annexb[i + 2] == 0 && nal_annexb[i + 3] == 1) {
+              if ((static_cast<uint8_t>(nal_annexb[i + 4]) & 0x1F) == 5) {
+                keyframe = true;
+                break;
+              }
+            } else if (i + 3 < nal_annexb.size() && nal_annexb[i] == 0 &&
+                       nal_annexb[i + 1] == 0 && nal_annexb[i + 2] == 1) {
+              if ((static_cast<uint8_t>(nal_annexb[i + 3]) & 0x1F) == 5) {
+                keyframe = true;
+                break;
+              }
+            }
+          }
+
           auto frag = mux->build_fragment(avcc, seqno++, decode_time,
                                           sample_duration, keyframe);
           decode_time += sample_duration;
@@ -662,6 +761,34 @@ bool preflight_fmp4_bootstrap(const CaptureParams &p,
   }
   if (!session->sps.empty() && !session->pps.empty()) {
     return true;
+  }
+
+  // RTSP/H264 pass-through path: SPS/PPS may come from SDP or in-band.
+  if (session->capture->pixel_format() == PixelFormat::H264) {
+    std::vector<uint8_t> sps;
+    std::vector<uint8_t> pps;
+    session->capture->get_sps_pps(sps, pps);
+    if (!sps.empty() && !pps.empty()) {
+      session->sps = std::move(sps);
+      session->pps = std::move(pps);
+      return true;
+    }
+    for (int i = 0; i < 80; ++i) {
+      std::string frame;
+      if (session->capture->latest_frame(frame)) {
+        std::vector<uint8_t> fsps;
+        std::vector<uint8_t> fpps;
+        extract_sps_pps(frame, fsps, fpps);
+        if (!fsps.empty() && !fpps.empty()) {
+          session->sps = std::move(fsps);
+          session->pps = std::move(fpps);
+          return true;
+        }
+      }
+      std::this_thread::sleep_for(25ms);
+    }
+    error = "timed out waiting for SPS/PPS from pass-through stream";
+    return false;
   }
 
   H264Encoder encoder;

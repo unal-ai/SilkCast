@@ -16,6 +16,8 @@ std::string json_array(const std::vector<std::string> &items);
 std::string build_error_json(const std::string &msg,
                              const std::string &details = "");
 const char *pixel_format_label(PixelFormat fmt);
+std::string url_decode(const std::string &in);
+std::string get_local_ip_address();
 
 #ifdef __linux__
 std::string build_device_caps_json(const std::string &device_id,

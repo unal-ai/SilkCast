@@ -129,15 +129,20 @@ public:
   void register_with(httplib::Server &svr) {
     std::cout << "[ApiRouter] Starting registration..." << std::endl;
     for (const auto &route : routes_) {
-      // Convert /path/{param} to /path/([^/]+) for httplib
+      // Convert /path/{param} to regex for httplib.
+      // Device IDs may include slashes after URL decode (for encoded RTSP URLs),
+      // so `{device}` must match across `/`.
       std::string regex_path = route.path;
       size_t start_pos = 0;
       while ((start_pos = regex_path.find('{', start_pos)) !=
              std::string::npos) {
         size_t end_pos = regex_path.find('}', start_pos);
         if (end_pos != std::string::npos) {
-          regex_path.replace(start_pos, end_pos - start_pos + 1, "([^/]+)");
-          start_pos += 8; // length of "([^/]+)"
+          const auto name =
+              regex_path.substr(start_pos + 1, end_pos - start_pos - 1);
+          const std::string token = (name == "device") ? "(.+)" : "([^/]+)";
+          regex_path.replace(start_pos, end_pos - start_pos + 1, token);
+          start_pos += token.size();
         } else {
           break;
         }

@@ -56,8 +56,8 @@ AdapterRegistry::AdapterRegistry() {
       {"v4l2_camera", AdapterRole::Input, "video", linux_enabled, {"live", "udp"}, {"linux"}, "V4L2 capture adapter"});
   register_adapter({"screen_mirror", AdapterRole::Input, "video", false, {"live"}, {"linux", "darwin", "windows"},
                     "Reserved screen mirror adapter"});
-  register_adapter({"rtsp_ingest", AdapterRole::Input, "video", false, {"live"}, {"linux", "darwin", "windows"},
-                    "Reserved RTSP ingest adapter"});
+  register_adapter({"rtsp_ingest", AdapterRole::Input, "video", true, {"live"}, {"linux", "darwin", "windows"},
+                    "RTSP ingest adapter"});
   register_adapter({"audio_stream_in", AdapterRole::Input, "audio", false, {"live"}, {"linux", "darwin", "windows"},
                     "Reserved audio ingest adapter"});
 

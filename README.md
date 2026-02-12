@@ -10,6 +10,7 @@ cmake --build build
 ```
 Endpoints (early stub):
 - `GET /device/list`
+- `GET /system/info`
 - `GET /capabilities` (single-source capability snapshot: codecs, containers, media kinds, adapter registrations)
 - `GET /stream/live/{id}?media=video&codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
 - `GET /device/{id}/caps` (V4L2 native formats, resolutions, and frame intervals; Linux only)
@@ -19,12 +20,23 @@ Endpoints (early stub):
 - `GET /stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` (best-effort UDP; Linux only; MTU-frag by kernel)
 - Capability negotiation uses strong central registries (`src/capability_registry.*` + `src/adapter_registry.*`), so codec/container/media/transport support is defined in one place.
 
-### H.264 / OpenH264 (compatibility default)
-- H.264 Baseline is enabled by default for broad compatibility; disable with `-DENABLE_OPENH264=OFF` if licensing is a concern.
-- On Linux x86_64/arm64, we auto-fetch Cisco’s official v2.6.0 binary + headers during CMake if `AUTO_FETCH_OPENH264=ON` (default).
+### RTSP Relay (no ffmpeg in runtime path)
+SilkCast can pull RTSP and relay to browsers with chunked fMP4 or raw Annex-B.  
+Treat the RTSP URL as `{id}` and URL-encode it in the path:
+
+- Browser-ready fMP4:
+  - `GET /stream/live/rtsp%3A%2F%2F192.168.1.50%3A8554%2Fstream?codec=h264&container=mp4`
+- Raw Annex-B:
+  - `GET /stream/live/rtsp%3A%2F%2F10.0.0.12%2Flive.sdp?codec=h264&container=raw`
+
+Notes:
+- If `{id}` starts with `rtsp://`, defaults are `codec=h264`, `container=mp4`, and ultra-latency preset unless explicitly overridden.
+- RTSP keepalive (`OPTIONS`/`GET_PARAMETER`) is sent automatically.
+- No ffmpeg/GStreamer dependency is required for the server relay pipeline.
+
 ### Lightweight pull clients
-- `docs/pull_client.md`: Python MJPEG receiver, without dependency of OpenCV/FFmpeg。
-- `docs/h264_pull_client.md`: C++ H.264 pull stream + OpenH264 decoding example, convenient for low-latency processing chain.
+- `docs/pull_client.md`: Python MJPEG receiver without OpenCV/FFmpeg dependency.
+- `docs/h264_pull_client.md`: C++ H.264 pull stream + OpenH264 decode example for low-latency pipelines.
 
 ### H.264 / OpenH264 (compatibility default)
 - H.264 Baseline is enabled by default for broad compatibility; disable with `-DENABLE_OPENH264=OFF` if licensing is a concern.
@@ -47,6 +59,9 @@ Override behavior with environment variables:
 - `STREAM_DEVICE=video1` to pick a specific device.
 - `STREAM_CODEC=mjpeg` or `STREAM_PARAMS=codec=mjpeg&fps=15` to control stream.
 - `SKIP_BUILD=1` to skip rebuilds.
+
+### RTSP smoke test (optional local validation)
+`scripts/rtsp_smoke.sh` spins up `mediamtx` + a synthetic RTSP publisher (`ffmpeg`), starts SilkCast, requests encoded RTSP relay over fMP4, and validates `ftyp` output.
 
 ### Requirements
 - Linux with V4L2 camera (e.g., `/dev/video0`); package `v4l-utils` recommended for debugging. Non-Linux builds compile but camera capture stubs out.
