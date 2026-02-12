@@ -25,7 +25,8 @@ std::string build_device_caps_json(const std::string &device_id,
 #endif
 
 // Parameter parsing / syncing
-CaptureParams parse_params(const httplib::Request &req);
+bool parse_params(const httplib::Request &req, CaptureParams &out,
+                  std::string &error_json);
 void apply_latency_preset(CaptureParams &p);
 void sync_session_params(Session &session);
 void add_effective_headers(httplib::Response &res, const EffectiveParams &eff);

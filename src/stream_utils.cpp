@@ -353,20 +353,77 @@ void extract_sps_pps(const std::string &annexb, std::vector<uint8_t> &sps,
   }
 }
 
-CaptureParams parse_params(const httplib::Request &req) {
+namespace {
+std::string build_param_error_json(const std::string &field,
+                                   const std::string &value,
+                                   const std::string &expected,
+                                   const std::string &details) {
+  return "{"
+         "\"error\":\"bad_request\","
+         "\"details\":\"" +
+         json_escape(details) +
+         "\","
+         "\"field\":\"" +
+         json_escape(field) +
+         "\","
+         "\"value\":\"" +
+         json_escape(value) +
+         "\","
+         "\"expected\":\"" +
+         json_escape(expected) + "\""
+         "}";
+}
+
+bool parse_int_param(const httplib::Request &req, const char *name,
+                     int min_value, int max_value, int &out,
+                     std::string &error_json) {
+  if (!req.has_param(name)) {
+    return true;
+  }
+  const std::string value = req.get_param_value(name);
+  try {
+    size_t pos = 0;
+    const long long parsed = std::stoll(value, &pos, 10);
+    if (pos != value.size()) {
+      error_json = build_param_error_json(
+          name, value, "integer",
+          std::string("parameter '") + name + "' must be an integer");
+      return false;
+    }
+    if (parsed < min_value || parsed > max_value) {
+      error_json = build_param_error_json(
+          name, value,
+          std::string("integer in [") + std::to_string(min_value) + "," +
+              std::to_string(max_value) + "]",
+          std::string("parameter '") + name + "' is out of range");
+      return false;
+    }
+    out = static_cast<int>(parsed);
+    return true;
+  } catch (...) {
+    error_json = build_param_error_json(
+        name, value, "integer",
+        std::string("parameter '") + name + "' must be an integer");
+    return false;
+  }
+}
+} // namespace
+
+bool parse_params(const httplib::Request &req, CaptureParams &out,
+                  std::string &error_json) {
   CaptureParams p;
-  if (req.has_param("w"))
-    p.width = std::stoi(req.get_param_value("w"));
-  if (req.has_param("h"))
-    p.height = std::stoi(req.get_param_value("h"));
-  if (req.has_param("fps"))
-    p.fps = std::stoi(req.get_param_value("fps"));
-  if (req.has_param("bitrate"))
-    p.bitrate_kbps = std::stoi(req.get_param_value("bitrate"));
-  if (req.has_param("quality"))
-    p.quality = std::stoi(req.get_param_value("quality"));
-  if (req.has_param("gop"))
-    p.gop = std::stoi(req.get_param_value("gop"));
+  if (!parse_int_param(req, "w", 1, 16384, p.width, error_json))
+    return false;
+  if (!parse_int_param(req, "h", 1, 16384, p.height, error_json))
+    return false;
+  if (!parse_int_param(req, "fps", 1, 240, p.fps, error_json))
+    return false;
+  if (!parse_int_param(req, "bitrate", 1, 1000000, p.bitrate_kbps, error_json))
+    return false;
+  if (!parse_int_param(req, "quality", 1, 100, p.quality, error_json))
+    return false;
+  if (!parse_int_param(req, "gop", 1, 1000, p.gop, error_json))
+    return false;
   if (req.has_param("media"))
     p.media = req.get_param_value("media");
   if (req.has_param("codec"))
@@ -386,7 +443,8 @@ CaptureParams parse_params(const httplib::Request &req) {
   p.latency = to_lower_copy(p.latency);
   p.container = to_lower_copy(p.container);
   apply_latency_preset(p);
-  return p;
+  out = std::move(p);
+  return true;
 }
 
 void apply_latency_preset(CaptureParams &p) {

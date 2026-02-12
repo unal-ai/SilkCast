@@ -194,18 +194,35 @@ int main(int argc, char *argv[]) {
                        "application/json");
                  }});
 
+  const auto ws_placeholder = [](const httplib::Request &,
+                                 httplib::Response &res) {
+    res.status = 501;
+    res.set_content(
+        stream::build_error_json(
+            "not_implemented",
+            "websocket transport requires a websocket-capable server build"),
+        "application/json");
+  };
   api.add_route({"/stream/ws/{device}",
                  "GET",
                  "WebSocket stream placeholder (requires WS-capable server)",
                  {{"device", ParamType::Device, "video0", "Device ID"}},
-                 [](const httplib::Request &, httplib::Response &res) {
-                   res.status = 501;
-                   res.set_content(
-                       stream::build_error_json(
-                           "not_implemented",
-                           "websocket transport requires a websocket-capable "
-                           "server build"),
-                       "application/json");
+                 ws_placeholder});
+  api.add_route({"/stream/ws",
+                 "GET",
+                 "WebSocket stream placeholder (query id form)",
+                 {{"id", ParamType::Device, "video0", "Device ID"}},
+                 [ws_placeholder](const httplib::Request &req,
+                                  httplib::Response &res) {
+                   if (!req.has_param("id") || req.get_param_value("id").empty()) {
+                     res.status = 400;
+                     res.set_content(
+                         stream::build_error_json("bad_request",
+                                                  "id query parameter is required"),
+                         "application/json");
+                     return;
+                   }
+                   ws_placeholder(req, res);
                  }});
 
   api.add_route(
@@ -358,7 +375,13 @@ int main(int argc, char *argv[]) {
          }
          std::string device_id = stream::url_decode(req.matches[1].str());
          bool is_rtsp = device_id.rfind("rtsp://", 0) == 0;
-         auto params = stream::parse_params(req);
+         CaptureParams params;
+         std::string parse_error_json;
+         if (!stream::parse_params(req, params, parse_error_json)) {
+           res.status = 400;
+           res.set_content(parse_error_json, "application/json");
+           return;
+         }
          if (!req.has_param("media"))
            params.media = "video";
          if (!req.has_param("codec"))
@@ -486,7 +509,13 @@ int main(int argc, char *argv[]) {
          int duration_sec = req.has_param("duration")
                                 ? std::stoi(req.get_param_value("duration"))
                                 : 10;
-         auto params = stream::parse_params(req);
+         CaptureParams params;
+         std::string parse_error_json;
+         if (!stream::parse_params(req, params, parse_error_json)) {
+           res.status = 400;
+           res.set_content(parse_error_json, "application/json");
+           return;
+         }
          if (!req.has_param("media"))
            params.media = "video";
          if (!req.has_param("codec"))

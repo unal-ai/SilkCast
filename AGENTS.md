@@ -173,6 +173,11 @@ Example:
   - **Rollback:** Restore previous control endpoints and disable lazy GET activation in router/session manager.
 
 Entries:
+- `[2026-02-12] [Codex] [API Hardening + Contract Alignment]`
+  - **What changed:** Replaced exception-based query parsing with explicit numeric parameter validation (`w/h/fps/bitrate/quality/gop`) and structured `400` JSON errors; added `/stream/ws` query-form placeholder route (`/stream/ws?id=...`) to align behavior with docs; added `clients/cpp/h264_pull.cpp` + `clients/cpp/CMakeLists.txt` so C++ pull-client docs reference real files.
+  - **Why:** Prevent runtime `500` from malformed user input, remove API contract drift for WS query path, and eliminate documentation/code mismatch for receiver tooling.
+  - **Impact:** Invalid numeric params now fail deterministically with actionable `bad_request` payloads; `GET /stream/ws?id=video0` now returns consistent `501 not_implemented` instead of `404`; C++ receiver onboarding path is now executable.
+  - **Rollback:** Revert `src/stream_utils.*`, `src/main.cpp`, `clients/cpp/*`, and `.gitignore`.
 - `[2026-02-12] [Codex] [RTSP Relay Integration]`
   - **What changed:** Integrated RTSP ingest path into shared sessions (`CaptureRTSP` + `CaptureInterface`), enabled `rtsp_ingest` adapter registration, added URL-decoded device handling for stream routes, and added `/system/info` plus RTSP relay smoke script `scripts/rtsp_smoke.sh`.
   - **Why:** Make RTSP a first-class input adapter under the same lazy-start/refcount session model while preventing route mismatch for URL-encoded RTSP IDs.
