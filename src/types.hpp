@@ -12,18 +12,15 @@ struct CaptureParams {
   int height = 480;
   int fps = 15;
   int bitrate_kbps = 256;
+  int quality = 80; // JPEG quality (1-100) for MJPEG
   int gop = 30;
   std::string media = "video";   // video | audio | av
-  std::string codec = "mjpeg";  // "h264" or "mjpeg"
-  std::string latency = "view"; // view | low | ultra
+  std::string codec = "mjpeg";   // h264 | mjpeg | h265 | av1 (reserved)
+  std::string latency = "view";  // view | low | ultra
   std::string container = "raw"; // raw | mp4 (fMP4)
 };
 
-enum class PixelFormat {
-  MJPEG,
-  YUYV,
-  UNKNOWN
-};
+enum class PixelFormat { MJPEG, YUYV, NV12, UNKNOWN };
 
 struct EffectiveParams {
   CaptureParams requested;
@@ -41,8 +38,20 @@ struct Session {
   PixelFormat pixel_format = PixelFormat::UNKNOWN;
   std::atomic<int> client_count{0};
   std::atomic<bool> running{false};
-  std::chrono::steady_clock::time_point last_accessed = std::chrono::steady_clock::now();
-  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point last_accessed =
+      std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point started =
+      std::chrono::steady_clock::now();
   std::atomic<uint64_t> frames_sent{0};
   std::atomic<uint64_t> bytes_sent{0};
+  std::atomic<uint32_t> idr_request_seq{0};
 };
+
+#pragma pack(push, 1)
+struct UdpFrameHeader {
+  uint32_t frame_id;
+  uint16_t frag_id;
+  uint16_t num_frags;
+  uint32_t data_size; // Payload size in this packet
+};
+#pragma pack(pop)

@@ -37,6 +37,13 @@ void append_box(std::string& out, const std::string& payload, const char* type) 
   out.append(payload);
 }
 
+void append_version_flags(std::string& out, uint8_t version, uint32_t flags) {
+  out.push_back(static_cast<char>(version));
+  out.push_back(static_cast<char>((flags >> 16) & 0xFF));
+  out.push_back(static_cast<char>((flags >> 8) & 0xFF));
+  out.push_back(static_cast<char>(flags & 0xFF));
+}
+
 } // namespace
 
 Mp4Fragmenter::Mp4Fragmenter(int width, int height, int fps, const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps)
@@ -61,8 +68,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
   // mvhd
   {
     std::string p;
-    p.push_back(0); // version
-    p.append(3, 0); // flags
+    append_version_flags(p, 0, 0);
     append_be32(p, 0); // creation time
     append_be32(p, 0); // modification
     append_be32(p, timescale_);
@@ -83,8 +89,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
   // tkhd
   {
     std::string p;
-    p.push_back(0);
-    p.push_back(0x00); p.push_back(0x00); p.push_back(0x07); // flags: enabled, in movie, in preview
+    append_version_flags(p, 0, 0x000007); // enabled, in movie, in preview
     append_be32(p, 0); // creation
     append_be32(p, 0); // modification
     append_be32(p, 1); // track id
@@ -93,7 +98,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
     append_be64(p, 0); // reserved
     append_be16(p, 0); // layer
     append_be16(p, 0); // alternate group
-    append_be16(p, 0x0100); // volume (0 for video), but set 0x0100?
+    append_be16(p, 0x0000); // volume (0 for video)
     append_be16(p, 0);
     uint32_t matrix[9] = {0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000};
     for (auto m : matrix) append_be32(p, m);
@@ -107,7 +112,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
   // mdhd
   {
     std::string p;
-    p.push_back(0); p.append(3, 0);
+    append_version_flags(p, 0, 0);
     append_be32(p, 0); // creation
     append_be32(p, 0); // modification
     append_be32(p, timescale_);
@@ -119,7 +124,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
   // hdlr
   {
     std::string p;
-    p.push_back(0); p.append(3,0);
+    append_version_flags(p, 0, 0);
     append_be32(p, 0);
     append_tag(p, "vide");
     p.append(12, 0);
@@ -132,22 +137,27 @@ std::string Mp4Fragmenter::build_init_segment() const {
   // vmhd
   {
     std::string p;
-    p.push_back(0); p.append(3,0x00); // flags=1?
+    append_version_flags(p, 0, 0x000001);
     append_be16(p, 0); append_be16(p, 0); append_be16(p,0); append_be16(p,0);
     append_box(minf, p, "vmhd");
   }
   // dinf
   {
-    std::string dref;
-    {
-      std::string url;
-      url.push_back(0); url.append(3,0); url.push_back(0); url.append(3,0); // version/flags (self contained)
-      append_box(dref, url, "url ");
-    }
+    std::string url;
+    append_version_flags(url, 0, 0x000001); // self-contained
+    std::string url_box;
+    append_box(url_box, url, "url ");
+
+    std::string dref_payload;
+    append_version_flags(dref_payload, 0, 0);
+    append_be32(dref_payload, 1);
+    dref_payload.append(url_box);
+
+    std::string dref_box;
+    append_box(dref_box, dref_payload, "dref");
+
     std::string dinf_payload;
-    dinf_payload.push_back(0); dinf_payload.append(3,0);
-    append_be32(dinf_payload, 1);
-    dinf_payload.append(dref);
+    dinf_payload.append(dref_box);
     append_box(minf, dinf_payload, "dinf");
   }
   // stbl
@@ -186,7 +196,7 @@ std::string Mp4Fragmenter::build_init_segment() const {
     append_box(stbl, avc1, "avc1");
 
     std::string stsd_payload;
-    stsd_payload.push_back(0); stsd_payload.append(3,0);
+    append_version_flags(stsd_payload, 0, 0);
     append_be32(stsd_payload, 1);
     stsd_payload.append(stbl);
     stbl.clear();
@@ -194,16 +204,29 @@ std::string Mp4Fragmenter::build_init_segment() const {
   }
   // stts, stsc, stsz, stco empty
   {
-    std::string p; p.push_back(0); p.append(3,0); append_be32(p,0); append_box(stbl,p,"stts");
+    std::string p;
+    append_version_flags(p, 0, 0);
+    append_be32(p,0);
+    append_box(stbl,p,"stts");
   }
   {
-    std::string p; p.push_back(0); p.append(3,0); append_be32(p,0); append_box(stbl,p,"stsc");
+    std::string p;
+    append_version_flags(p, 0, 0);
+    append_be32(p,0);
+    append_box(stbl,p,"stsc");
   }
   {
-    std::string p; p.push_back(0); p.append(3,0); append_be32(p,0); append_box(stbl,p,"stsz");
+    std::string p;
+    append_version_flags(p, 0, 0);
+    append_be32(p, 0); // sample_size
+    append_be32(p, 0); // sample_count
+    append_box(stbl,p,"stsz");
   }
   {
-    std::string p; p.push_back(0); p.append(3,0); append_be32(p,0); append_box(stbl,p,"stco");
+    std::string p;
+    append_version_flags(p, 0, 0);
+    append_be32(p,0);
+    append_box(stbl,p,"stco");
   }
 
   append_box(minf, stbl, "stbl");
@@ -215,9 +238,9 @@ std::string Mp4Fragmenter::build_init_segment() const {
   {
     std::string mvex;
     std::string trex;
-    trex.push_back(0); trex.append(3,0);
+    append_version_flags(trex, 0, 0);
     append_be32(trex, 1); // track id
-    append_be32(trex, 0); // default sample desc
+    append_be32(trex, 1); // default sample desc (1-based)
     append_be32(trex, 0); // duration
     append_be32(trex, 0); // size
     append_be32(trex, 0x01000000); // flags
@@ -236,7 +259,7 @@ std::string Mp4Fragmenter::build_fragment(const std::vector<uint8_t>& avcc_sampl
   std::string mfhd;
   {
     std::string p;
-    p.push_back(0); p.append(3,0);
+    append_version_flags(p, 0, 0);
     append_be32(p, seq);
     append_box(mfhd, p, "mfhd");
   }
@@ -244,31 +267,34 @@ std::string Mp4Fragmenter::build_fragment(const std::vector<uint8_t>& avcc_sampl
   std::string tfhd;
   {
     std::string p;
-    p.push_back(0); p.append(3,0);
+    append_version_flags(p, 0, 0x020000); // default-base-is-moof
     append_be32(p, 1); // track id
-    append_be32(p, 0x020000); // default-base-is-moof
     append_box(tfhd, p, "tfhd");
   }
 
   std::string tfdt;
   {
     std::string p;
-    p.push_back(0); p.append(3,0);
+    append_version_flags(p, 0, 0);
     append_be32(p, static_cast<uint32_t>(base_decode_time));
     append_box(tfdt, p, "tfdt");
   }
 
-  // Precompute sizes to set trun data-offset
-  uint32_t trun_payload = 4 /*ver/flags*/ + 4 /*count*/ + 4 /*offset*/ + 4 /*duration*/ + 4 /*size*/ + 4 /*flags*/;
+  // Precompute sizes to set trun data-offset (traf/moof include headers).
+  uint32_t trun_payload =
+      4 /*ver/flags*/ + 4 /*count*/ + 4 /*offset*/ + 4 /*duration*/ +
+      4 /*size*/ + 4 /*flags*/;
   uint32_t trun_size = trun_payload + 8;
-  uint32_t traf_size = static_cast<uint32_t>(tfhd.size() + tfdt.size() + trun_size + 8); // traf header
-  uint32_t moof_size = static_cast<uint32_t>(mfhd.size() + traf_size + 8); // moof header
+  uint32_t traf_size =
+      static_cast<uint32_t>(tfhd.size() + tfdt.size() + trun_size + 8);
+  uint32_t moof_size =
+      static_cast<uint32_t>(mfhd.size() + traf_size + 8);
   uint32_t data_offset = moof_size + 8; // mdat header
 
   std::string trun;
   {
     std::string p;
-    p.push_back(0); p.append(3,0x0F);
+    append_version_flags(p, 0, 0x000701);
     append_be32(p, 1);
     append_be32(p, data_offset);
     append_be32(p, sample_duration);
@@ -278,19 +304,21 @@ std::string Mp4Fragmenter::build_fragment(const std::vector<uint8_t>& avcc_sampl
     append_box(trun, p, "trun");
   }
 
+  std::string traf_payload;
+  traf_payload.append(tfhd);
+  traf_payload.append(tfdt);
+  traf_payload.append(trun);
   std::string traf;
-  traf.append(tfhd);
-  traf.append(tfdt);
-  traf.append(trun);
+  append_box(traf, traf_payload, "traf");
 
   std::string moof_payload;
   moof_payload.append(mfhd);
   moof_payload.append(traf);
+  std::string moof;
+  append_box(moof, moof_payload, "moof");
 
   std::string out;
-  append_be32(out, moof_size);
-  append_tag(out, "moof");
-  out.append(moof_payload);
+  out.append(moof);
   append_be32(out, static_cast<uint32_t>(8 + avcc_sample.size()));
   append_tag(out, "mdat");
   out.append(reinterpret_cast<const char*>(avcc_sample.data()), avcc_sample.size());

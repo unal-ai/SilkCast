@@ -49,7 +49,6 @@ If you only have 2 minutes, align on these points first:
 - Do not optimize for advanced multi-node orchestration yet.
 - Do not ship production H.265/AV1 encode paths yet unless they directly unblock reliability work; reserve interfaces first.
 - Do not add control-plane complexity (auth/policy/plugin systems) before the core streaming path is stable.
-
 ---
 
 ## 3. The "Just GET" API (RESTful)
@@ -259,12 +258,14 @@ Entries:
 - Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264` → YUYV (converted to I420).
 - H.264 encoding via optional OpenH264 (Cisco binary recommended for patent coverage); Annex-B NALs streamed over HTTP chunked.
 - MJPEG and H.264 share lazy sessions; codec mismatches return 409 with `Effective-Params`.
-- CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens `/device/list`.
+- CLI flags: `--addr`, `--port`, `--idle-timeout`, `--codec`. Desktop launcher: `scripts/launch_desktop.sh` builds then opens the demo UI at `/` (override with env vars).
 - Packaging: `scripts/build_linux.sh` for amd64/arm64; systemd unit at `packaging/systemd/silkcast.service`. Non-Linux builds stub capture.
 - I420 conversion is foundational; keep a fast YUYV→I420 path and avoid buffering (“latest frame only”) for preview/tele-op use. 
 - Stats: `/stream/{id}/stats` returns fps/bitrate estimates based on sent frames/bytes; session tracks frames/bytes/clients and resets on first start. IDR forced on client join for H.264.
 - WebSocket: current `cpp-httplib v0.15.x` build exposes `/stream/ws` and `/stream/ws/{id}` as explicit `501 not_implemented` placeholders; binary WS streaming is reserved for a websocket-capable server build.
-- UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends best-effort UDP (Annex-B or MJPEG) for ultra-low latency; Linux only, kernel fragmentation (MTU best effort).
+- UDP: `/stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` sends fragmented packets with a custom binary header `[frame_id:4][frag_id:2][num_frags:2][data_size:4]` + payload. This enables robust reassembly and frame recovery on the client side.
+- Feedback Loop: `POST /stream/{id}/feedback?type=idr` allows clients to request Instant Decoder Refresh (critical for H.264 packet loss recovery).
+- Client SDK: `client/silkcast_client.py` provided as a reference Python implementation for high-performance receiving.
 - fMP4: `/stream/live/{id}?codec=h264&container=mp4` returns chunked fragmented MP4 (tiny fragments, Baseline, IDR on join). CORS + no-store headers applied.
 - OpenH264 fetch: Enabled by default. `AUTO_FETCH_OPENH264=ON` auto-downloads Cisco v2.6.0 binary+headers on Linux x86_64/arm64; else set `OPENH264_ROOT` or system install. Disable with `-DENABLE_OPENH264=OFF` if licensing blocks usage. Future codecs (H.265/AV1) are out-of-scope for now but keep build flags flexible.
 - Current shipping focus is video stream delivery (MJPEG/H.264). Audio stream and virtual device paths are reserved in architecture and will follow the same lazy shared-session model when implemented.
