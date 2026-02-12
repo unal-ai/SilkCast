@@ -10,17 +10,20 @@ cmake --build build
 ```
 Endpoints (early stub):
 - `GET /device/list`
-- `GET /stream/live/{id}?codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
+- `GET /capabilities` (single-source capability snapshot: codecs, containers, media kinds, adapter registrations)
+- `GET /stream/live/{id}?media=video&codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
 - `GET /stream/live/{id}?codec=h264&container=mp4` (chunked fMP4: Baseline, IDR on join, tiny fragments)
 - `GET /stream/{id}/stats`
-- `GET /stream/ws?id={id}&codec=mjpeg|h264` (WebSocket binary frames)
+- `GET /stream/ws/{id}` and `GET /stream/ws?id={id}` (currently returns `501 not_implemented` in this `cpp-httplib v0.15.x` build; reserved for WS transport)
 - `GET /stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` (best-effort UDP; Linux only; MTU-frag by kernel)
+- Capability negotiation uses strong central registries (`src/capability_registry.*` + `src/adapter_registry.*`), so codec/container/media/transport support is defined in one place.
 
-### H.264 / OpenH264 (ON by default)
-- H.264 is enabled by default via OpenH264. Disable with `-DENABLE_OPENH264=OFF` if you cannot use Cisco’s binary license.
-- On Linux x86_64/arm64, we auto-fetch Cisco’s official v2.6.0 binary + headers during CMake if `AUTO_FETCH_OPENH264=ON` (default). This keeps the Cisco binary license path intact.
+### H.264 / OpenH264 (compatibility default)
+- H.264 Baseline is enabled by default for broad compatibility; disable with `-DENABLE_OPENH264=OFF` if licensing is a concern.
+- On Linux x86_64/arm64, we auto-fetch Cisco’s official v2.6.0 binary + headers during CMake if `AUTO_FETCH_OPENH264=ON` (default).
 - Otherwise, set `OPENH264_ROOT=/path/to/openh264` or install `libopenh264` system-wide.
-- When `codec=h264`, capture uses YUYV → I420 → OpenH264 (Baseline, zero-latency); HTTP chunked delivers Annex-B NALs, or fMP4 if `container=mp4`.
+- Flow: capture YUYV → I420 → OpenH264 (Baseline, low-delay); HTTP chunked delivers Annex-B NALs, or fMP4 if `container=mp4`.
+- Future room: H.265/AV1 can be added later behind optional builds—nothing claimed or shipped yet.
 
 ### CLI flags
 - `--addr <ip>` bind address (default `0.0.0.0`)

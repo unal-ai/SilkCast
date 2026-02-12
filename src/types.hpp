@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 struct CaptureParams {
   int width = 640;
@@ -11,6 +13,7 @@ struct CaptureParams {
   int fps = 15;
   int bitrate_kbps = 256;
   int gop = 30;
+  std::string media = "video";   // video | audio | av
   std::string codec = "mjpeg";  // "h264" or "mjpeg"
   std::string latency = "view"; // view | low | ultra
   std::string container = "raw"; // raw | mp4 (fMP4)

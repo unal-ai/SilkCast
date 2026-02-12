@@ -79,6 +79,10 @@ endif()
 
 add_executable(silkcast
   src/main.cpp
+  src/capability_registry.cpp
+  src/capability_registry.hpp
+  src/adapter_registry.cpp
+  src/adapter_registry.hpp
   src/types.hpp
   src/capture_v4l2.cpp
   src/capture_v4l2.hpp

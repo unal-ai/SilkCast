@@ -44,5 +44,8 @@ public:
   void stop() {}
   bool running() const { return false; }
   bool latest_frame(std::string &) { return false; }
+  PixelFormat pixel_format() const { return PixelFormat::UNKNOWN; }
+  int width() const { return 0; }
+  int height() const { return 0; }
 };
 #endif

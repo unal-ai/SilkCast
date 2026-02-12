@@ -33,9 +33,6 @@ bool H264Encoder::init(const CaptureParams &params) {
   p.iTargetBitrate = bitrate_kbps_ * 1000;
   p.iRCMode = RC_BITRATE_MODE;
   p.fMaxFrameRate = static_cast<float>(fps_);
-  p.iTemporalLayerNum = 1;
-  p.iSpatialLayerNum = 1;
-  p.iMultipleThreadIdc = 1;
 
   if (enc_->Initialize(&p) != 0) {
     return false;
@@ -44,12 +41,6 @@ bool H264Encoder::init(const CaptureParams &params) {
   // Baseline profile, zero-latency.
   int profile = PRO_BASELINE;
   enc_->SetOption(ENCODER_OPTION_PROFILE, &profile);
-  bool enable_denoise = false;
-  enc_->SetOption(ENCODER_OPTION_ENABLE_DENOISE, &enable_denoise);
-  int skip_frames = 0;
-  enc_->SetOption(ENCODER_OPTION_SKIP_FRAMES, &skip_frames);
-  bool cabac = false;
-  enc_->SetOption(ENCODER_OPTION_CABAC, &cabac);
   int gop = params.gop > 0 ? params.gop : 30;
   enc_->SetOption(ENCODER_OPTION_IDR_INTERVAL, &gop);
 

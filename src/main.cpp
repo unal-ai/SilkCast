@@ -9,8 +9,11 @@
 #include <vector>
 #include <unistd.h>
 #include <algorithm>
+#include <cctype>
 
 #include "httplib.h"
+#include "adapter_registry.hpp"
+#include "capability_registry.hpp"
 #include "capture_v4l2.hpp"
 #include "encoder_h264.hpp"
 #include "types.hpp"
@@ -61,8 +64,9 @@ public:
     auto it = sessions_.find(device_id);
     if (it != sessions_.end()) {
       if (it->second->client_count.load() == 0) {
-        if (it->second->capture) it->second->capture->stop();
-        sessions_.erase(it);
+        // Keep session cached until idle reaper timeout; this preserves lazy
+        // hot-path reuse across short client gaps.
+        it->second->last_accessed = std::chrono::steady_clock::now();
       }
     }
   }
@@ -139,6 +143,13 @@ std::string json_array(const std::vector<std::string> &items) {
   return out;
 }
 
+std::string to_lower_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return s;
+}
+
 std::string build_error_json(const std::string &msg, const std::string &details = "") {
   std::string out = "{\"error\":\"" + msg + "\"";
   if (!details.empty()) out += ",\"details\":\"" + details + "\"";
@@ -203,15 +214,44 @@ CaptureParams parse_params(const httplib::Request &req) {
   if (req.has_param("fps")) p.fps = std::stoi(req.get_param_value("fps"));
   if (req.has_param("bitrate")) p.bitrate_kbps = std::stoi(req.get_param_value("bitrate"));
   if (req.has_param("gop")) p.gop = std::stoi(req.get_param_value("gop"));
+  if (req.has_param("media")) p.media = req.get_param_value("media");
   if (req.has_param("codec")) p.codec = req.get_param_value("codec");
   if (req.has_param("latency")) p.latency = req.get_param_value("latency");
   if (req.has_param("container")) p.container = req.get_param_value("container");
+  p.media = to_lower_copy(p.media);
+  p.codec = to_lower_copy(p.codec);
+  p.container = to_lower_copy(p.container);
+  p.latency = to_lower_copy(p.latency);
   return p;
+}
+
+bool validate_media_params(const AdapterRegistry &adapters,
+                           const std::string &media,
+                           const std::string &transport,
+                           httplib::Response &res) {
+  const auto vr = adapters.validate_request(media, transport);
+  if (vr.ok) return true;
+  res.status = vr.status;
+  res.set_content(vr.body, "application/json");
+  return false;
+}
+
+bool validate_transport_params(const CapabilityRegistry &registry,
+                               const CaptureParams &params,
+                               TransportKind transport,
+                               httplib::Response &res) {
+  const auto vr = registry.validate(params, transport);
+  if (vr.ok) return true;
+  res.status = vr.status;
+  res.set_content(vr.body, "application/json");
+  return false;
 }
 
 void add_effective_headers(httplib::Response &res, const EffectiveParams &eff) {
   const auto &a = eff.actual;
   res.set_header("Effective-Params",
+                 "media=" + a.media +
+                 ";" +
                  "codec=" + a.codec +
                  ";w=" + std::to_string(a.width) +
                  ";h=" + std::to_string(a.height) +
@@ -439,7 +479,7 @@ int main(int argc, char* argv[]) {
     } else if (arg == "--idle-timeout" && i + 1 < argc) {
       cfg.idle_timeout = std::stoi(argv[++i]);
     } else if (arg == "--codec" && i + 1 < argc) {
-      cfg.default_codec = argv[++i];
+      cfg.default_codec = to_lower_copy(argv[++i]);
     } else if (arg == "--help" || arg == "-h") {
       std::cout << "SilkCast\n"
                 << "  --addr <ip>          Bind address (default 0.0.0.0)\n"
@@ -450,117 +490,48 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  cfg.default_codec = to_lower_copy(cfg.default_codec);
+  const auto &registry = CapabilityRegistry::instance();
+  const auto &adapters = AdapterRegistry::instance();
+  if (!registry.is_known_codec(cfg.default_codec) ||
+      !registry.is_enabled_codec(cfg.default_codec)) {
+    std::cerr << "default codec '" << cfg.default_codec
+              << "' is not enabled in this build; falling back to 'mjpeg'\n";
+    cfg.default_codec = "mjpeg";
+  }
+
   SessionManager sessions(cfg.idle_timeout);
   httplib::Server svr;
 
-  // WebSocket low-latency stream (binary MJPEG or H.264 NALs)
-  svr.set_ws_endpoint("/stream/ws", [&sessions](const httplib::Request &req, const std::shared_ptr<httplib::WebSocket> ws) {
-    if (!req.has_param("id")) {
-      ws->send("missing id", httplib::OpCode::CLOSE);
-      return;
-    }
-    const auto device_id = req.get_param_value("id");
-    auto params = parse_params(req);
-    if (params.codec.empty()) params.codec = "mjpeg";
-    auto session = sessions.get_or_create(device_id, params);
-    session->client_count.fetch_add(1);
-    session->last_accessed = std::chrono::steady_clock::now();
-
-    if (params.codec != session->params.codec) {
-      res.status = 409;
-      res.set_content(build_error_json("conflict", "codec locked by first requester"), "application/json");
-      session->client_count.fetch_sub(1);
-      return;
-    }
-
-    if (params.codec != session->params.codec) {
-      ws->send("conflict: codec locked", httplib::OpCode::CLOSE);
-      session->client_count.fetch_sub(1);
-      return;
-    }
-
-    // Start capture if needed.
-    if (!session->capture->running()) {
-      if (!session->capture->start(device_id, session->params)) {
-        ws->send("camera_unavailable", httplib::OpCode::CLOSE);
-        session->client_count.fetch_sub(1);
-        return;
-      }
-      session->pixel_format = session->capture->pixel_format();
-      session->started = std::chrono::steady_clock::now();
-      session->frames_sent = 0;
-      session->bytes_sent = 0;
-    }
-
-    std::thread([ws, session, params]() {
-      const int frame_interval_ms = std::max(1, 1000 / std::max(1, params.fps));
-      std::string frame;
-      std::string yuv;
-      const int y_size = params.width * params.height;
-      const int uv_size = (params.width / 2) * (params.height / 2);
-      yuv.resize(y_size + 2 * uv_size);
-      uint8_t* y = reinterpret_cast<uint8_t*>(yuv.data());
-      uint8_t* u = y + y_size;
-      uint8_t* v = u + uv_size;
-      bool first = true;
-
-      while (true) {
-        if (!session->capture || !session->capture->running()) {
-          std::this_thread::sleep_for(10ms);
-          continue;
-        }
-        if (!session->capture->latest_frame(frame)) {
-          std::this_thread::sleep_for(5ms);
-          continue;
-        }
-        if (params.codec == "mjpeg") {
-          if (!ws->send(frame, httplib::OpCode::BINARY)) break;
-          session->frames_sent.fetch_add(1);
-          session->bytes_sent.fetch_add(frame.size());
-        } else if (params.codec == "h264") {
-#ifdef HAS_OPENH264
-          if (!session->encoder) {
-            session->encoder = std::make_shared<H264Encoder>();
-            if (!session->encoder->init(session->params)) {
-              ws->send("encode_init_failed", httplib::OpCode::CLOSE);
-              break;
-            }
-            session->encoder->force_idr();
-            first = false;
-          }
-          if (session->capture->pixel_format() != PixelFormat::YUYV) {
-            std::this_thread::sleep_for(5ms);
-            continue;
-          }
-          yuyv_to_i420(reinterpret_cast<const uint8_t*>(frame.data()), params.width, params.height, y, u, v);
-          if (first) { session->encoder->force_idr(); first = false; }
-          std::string nal;
-          if (!session->encoder->encode_i420(y, u, v, nal)) {
-            std::this_thread::sleep_for(5ms);
-            continue;
-          }
-          static const char start_code[] = {0x00, 0x00, 0x00, 0x01};
-          std::string packet;
-          packet.reserve(sizeof(start_code) + nal.size());
-          packet.append(start_code, sizeof(start_code));
-          packet.append(nal);
-          if (!ws->send(packet, httplib::OpCode::BINARY)) break;
-          session->frames_sent.fetch_add(1);
-          session->bytes_sent.fetch_add(packet.size());
-#else
-          ws->send("h264_disabled", httplib::OpCode::CLOSE);
-          break;
-#endif
-        } else {
-          ws->send("unsupported_codec", httplib::OpCode::CLOSE);
-          break;
-        }
-        session->last_accessed = std::chrono::steady_clock::now();
-        std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
-      }
-      session->client_count.fetch_sub(1);
-      sessions.release_if_idle(session->device_id);
-    }).detach();
+  // cpp-httplib v0.15.x does not expose a WebSocket server API. Keep explicit
+  // endpoint placeholders so clients receive a deterministic response.
+  auto ws_not_implemented = [](const httplib::Request &, httplib::Response &res) {
+    res.status = 501;
+    res.set_content(
+        build_error_json("not_implemented",
+                         "websocket transport requires a websocket-capable server build"),
+        "application/json");
+  };
+  svr.Get(R"(/stream/ws)", ws_not_implemented);
+  svr.Get(R"(/stream/ws/([^/]+))", ws_not_implemented);
+  svr.Get(R"(/capabilities)", [&registry, &adapters](const httplib::Request &, httplib::Response &res) {
+    res.status = 200;
+    res.set_content(
+        "{"
+        "\"codecs\":{"
+        "\"known\":" + json_array(registry.known_codecs()) + ","
+        "\"enabled\":" + json_array(registry.enabled_codecs()) +
+        "},"
+        "\"containers\":{"
+        "\"known\":" + json_array(registry.known_containers()) +
+        "},"
+        "\"media\":{"
+        "\"known\":" + json_array(adapters.known_media_kinds()) + ","
+        "\"enabled\":" + json_array(adapters.enabled_media_kinds()) +
+        "},"
+        "\"adapters\":" + adapters.adapters_json() +
+        "}",
+        "application/json");
   });
   svr.Get(R"(/device/list)", [&sessions](const httplib::Request &, httplib::Response &res) {
     auto devices = sessions.list_devices();
@@ -570,7 +541,7 @@ int main(int argc, char* argv[]) {
   });
 
   svr.Get(R"(/stream/([^/]+)/stats)", [&sessions](const httplib::Request &req, httplib::Response &res) {
-    auto device_id = req.matches[1];
+    std::string device_id = req.matches[1];
     auto session_opt = sessions.find(device_id);
     if (!session_opt) {
       res.status = 404;
@@ -600,11 +571,14 @@ int main(int argc, char* argv[]) {
         "application/json");
   });
 
-  svr.Get(R"(/stream/live/([^/]+))", [&sessions](const httplib::Request &req, httplib::Response &res) {
-    auto device_id = req.matches[1];
+  svr.Get(R"(/stream/live/([^/]+))", [&sessions, &cfg, &registry, &adapters](const httplib::Request &req, httplib::Response &res) {
+    std::string device_id = req.matches[1];
     auto params = parse_params(req);
-    if (params.codec.empty()) params.codec = "mjpeg";
+    if (params.media.empty()) params.media = "video";
+    if (params.codec.empty()) params.codec = cfg.default_codec;
     if (params.container.empty()) params.container = "raw";
+    if (!validate_media_params(adapters, params.media, "live", res)) return;
+    if (!validate_transport_params(registry, params, TransportKind::Live, res)) return;
 
     // On-demand session creation.
     auto session = sessions.get_or_create(device_id, params);
@@ -615,10 +589,13 @@ int main(int argc, char* argv[]) {
     add_effective_headers(res, eff);
 
     // If request codec/container mismatch first-comer, respond 409 with Effective-Params.
-    if (params.codec != session->params.codec || params.container != session->params.container) {
+    if (params.media != session->params.media ||
+        params.codec != session->params.codec ||
+        params.container != session->params.container) {
       res.status = 409;
       res.set_content(build_error_json("conflict", "params locked by first requester"), "application/json");
       session->client_count.fetch_sub(1);
+      sessions.release_if_idle(device_id);
       return;
     }
 
@@ -626,15 +603,16 @@ int main(int argc, char* argv[]) {
     if (!session->capture->running()) {
       if (!session->capture->start(device_id, session->params)) {
         res.status = 503;
-      res.set_content(build_error_json("device_unavailable", "failed to open camera"), "application/json");
-      session->client_count.fetch_sub(1);
-      return;
+        res.set_content(build_error_json("device_unavailable", "failed to open camera"), "application/json");
+        session->client_count.fetch_sub(1);
+        sessions.release_if_idle(device_id);
+        return;
+      }
+      session->pixel_format = session->capture->pixel_format();
+      session->started = std::chrono::steady_clock::now();
+      session->frames_sent = 0;
+      session->bytes_sent = 0;
     }
-    session->pixel_format = session->capture->pixel_format();
-    session->started = std::chrono::steady_clock::now();
-    session->frames_sent = 0;
-    session->bytes_sent = 0;
-  }
 
     if (params.codec == "mjpeg") {
       serve_mjpeg_live(session->params, res, session);
@@ -645,17 +623,18 @@ int main(int argc, char* argv[]) {
         serve_h264_live(session->params, res, session);
       }
     } else {
-      res.status = 400;
-      res.set_content(build_error_json("bad_request", "unsupported codec"), "application/json");
+      res.status = 500;
+      res.set_content(build_error_json("internal_error", "validated codec missing runtime handler"),
+                      "application/json");
     }
 
     session->client_count.fetch_sub(1);
     sessions.release_if_idle(device_id);
   });
 
-  svr.Get(R"(/stream/udp/([^/]+))", [&sessions](const httplib::Request &req, httplib::Response &res) {
+  svr.Get(R"(/stream/udp/([^/]+))", [&sessions, &registry, &adapters](const httplib::Request &req, httplib::Response &res) {
 #ifdef __linux__
-    auto device_id = req.matches[1];
+    std::string device_id = req.matches[1];
     if (!req.has_param("target") || !req.has_param("port")) {
       res.status = 400;
       res.set_content(build_error_json("bad_request", "target and port are required"), "application/json");
@@ -665,17 +644,32 @@ int main(int argc, char* argv[]) {
     int port = std::stoi(req.get_param_value("port"));
     int duration_sec = req.has_param("duration") ? std::stoi(req.get_param_value("duration")) : 10;
     auto params = parse_params(req);
+    if (params.media.empty()) params.media = "video";
     if (params.codec.empty()) params.codec = "h264"; // UDP favors H.264
+    if (params.container.empty()) params.container = "raw";
+    if (!validate_media_params(adapters, params.media, "udp", res)) return;
+    if (!validate_transport_params(registry, params, TransportKind::Udp, res)) return;
 
     auto session = sessions.get_or_create(device_id, params);
     session->client_count.fetch_add(1);
     session->last_accessed = std::chrono::steady_clock::now();
+
+    if (params.media != session->params.media ||
+        params.codec != session->params.codec ||
+        params.container != session->params.container) {
+      res.status = 409;
+      res.set_content(build_error_json("conflict", "params locked by first requester"), "application/json");
+      session->client_count.fetch_sub(1);
+      sessions.release_if_idle(device_id);
+      return;
+    }
 
     if (!session->capture->running()) {
       if (!session->capture->start(device_id, session->params)) {
         res.status = 503;
         res.set_content(build_error_json("device_unavailable", "failed to open camera"), "application/json");
         session->client_count.fetch_sub(1);
+        sessions.release_if_idle(device_id);
         return;
       }
       session->pixel_format = session->capture->pixel_format();
@@ -785,6 +779,8 @@ int main(int argc, char* argv[]) {
   });
 
   svr.set_error_handler([](const httplib::Request &, httplib::Response &res) {
+    // Keep route-provided structured error payloads.
+    if (!res.body.empty()) return;
     if (res.status == 404) {
       res.set_content(build_error_json("not_found"), "application/json");
     } else {
