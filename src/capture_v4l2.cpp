@@ -154,6 +154,7 @@ bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
                 << errno << "\n";
     }
     if (!quality_set) {
+#ifdef V4L2_CID_JPEG_Q_FACTOR
       ctrl.id = V4L2_CID_JPEG_Q_FACTOR;
       ctrl.value = params.quality;
       if (xioctl(fd, VIDIOC_S_CTRL, &ctrl)) {
@@ -163,6 +164,7 @@ bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
         std::cerr << "VIDIOC_S_CTRL(JPEG_Q_FACTOR) failed; errno=" << errno
                   << "\n";
       }
+#endif
     }
     if (quality_set && applied_ctrl != 0) {
       v4l2_control get{};

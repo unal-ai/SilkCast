@@ -18,6 +18,13 @@
 #include <netinet/in.h>
 #endif
 
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
 #include "api_router.hpp"
 #include "capture_v4l2.hpp"
 #include "encoder_h264.hpp"

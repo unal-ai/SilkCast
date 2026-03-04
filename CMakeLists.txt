@@ -41,6 +41,7 @@ if(ENABLE_OPENH264)
     endif()
     set(_OH_BIN_BZ2 ${_OH_BASE}/lib/libopenh264.so.bz2)
     set(_OH_BIN ${_OH_BASE}/lib/libopenh264.so)
+    set(_OH_BIN_SO8 ${_OH_BASE}/lib/libopenh264.so.8)
     if(NOT EXISTS ${_OH_BIN})
       message(STATUS "Fetching OpenH264 binary from ${_OH_BIN_URL}")
       file(MAKE_DIRECTORY ${_OH_BASE}/lib)
@@ -55,6 +56,15 @@ if(ENABLE_OPENH264)
         message(WARNING "bunzip2 not found, trying alternative download")
       endif()
       file(DOWNLOAD http://www.openh264.org/BINARY_LICENSE.txt ${_OH_BASE}/BINARY_LICENSE.txt SHOW_PROGRESS)
+    endif()
+    if(EXISTS ${_OH_BIN} AND NOT EXISTS ${_OH_BIN_SO8})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libopenh264.so libopenh264.so.8
+        WORKING_DIRECTORY ${_OH_BASE}/lib
+      )
+    endif()
+    if(NOT EXISTS ${_OH_BIN} AND EXISTS ${_OH_BIN_SO8})
+      set(_OH_BIN ${_OH_BIN_SO8})
     endif()
     set(OPENH264_LIBRARY ${_OH_BIN})
   else()
@@ -131,6 +141,13 @@ if(HAS_OPENH264)
   target_compile_definitions(silkcast PRIVATE HAS_OPENH264=1)
   target_include_directories(silkcast PRIVATE ${OPENH264_INCLUDE_DIR})
   target_link_libraries(silkcast PRIVATE ${OPENH264_LIBRARY})
+  get_filename_component(OPENH264_LIBRARY_DIR ${OPENH264_LIBRARY} DIRECTORY)
+  if(OPENH264_LIBRARY_DIR)
+    set_target_properties(silkcast PROPERTIES
+      BUILD_RPATH ${OPENH264_LIBRARY_DIR}
+      INSTALL_RPATH ${OPENH264_LIBRARY_DIR}
+    )
+  endif()
 endif()
 
 if(APPLE)
