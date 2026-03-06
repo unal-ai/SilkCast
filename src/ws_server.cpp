@@ -359,12 +359,27 @@ bool parse_capture_params(const QueryMap &query, CaptureParams &out,
   if (container_it != query.end()) {
     params.container = container_it->second;
   }
+  const auto pixfmt_it = query.find("pixfmt");
+  if (pixfmt_it != query.end()) {
+    params.pixfmt = pixfmt_it->second;
+  }
 
   params.media = to_lower_copy(params.media);
   params.codec = to_lower_copy(params.codec);
   params.latency = to_lower_copy(params.latency);
   params.container = to_lower_copy(params.container);
+  params.pixfmt = to_lower_copy(params.pixfmt);
   stream::apply_latency_preset(params);
+  if (params.codec == "raw") {
+    if (params.pixfmt.empty()) {
+      params.pixfmt = "i420";
+    } else if (!stream::is_supported_raw_pixfmt(params.pixfmt)) {
+      error_json = build_param_error_json(
+          "pixfmt", params.pixfmt, "i420|rgb24",
+          "parameter 'pixfmt' must be one of: i420, rgb24");
+      return false;
+    }
+  }
   out = std::move(params);
   return true;
 }
@@ -682,6 +697,61 @@ bool stream_h264(int fd, const CaptureParams &params,
   }
 }
 
+bool stream_raw(int fd, const CaptureParams &params,
+                const std::shared_ptr<Session> &session) {
+  const int width = params.width;
+  const int height = params.height;
+  const int y_size = width * height;
+  const int uv_size = (width / 2) * (height / 2);
+  const int frame_interval_ms = std::max(1, 1000 / std::max(1, params.fps));
+
+  std::string frame;
+  std::string i420(y_size + (2 * uv_size), '\0');
+  std::string payload(stream::raw_frame_size_bytes(params), '\0');
+  uint8_t *y = reinterpret_cast<uint8_t *>(i420.data());
+  uint8_t *u = y + y_size;
+  uint8_t *v = u + uv_size;
+
+  while (true) {
+    if (!session->capture || !session->capture->running()) {
+      std::this_thread::sleep_for(20ms);
+      continue;
+    }
+    if (!session->capture->latest_frame(frame)) {
+      std::this_thread::sleep_for(10ms);
+      continue;
+    }
+
+    const PixelFormat fmt = session->capture->pixel_format();
+    if (fmt != PixelFormat::YUYV && fmt != PixelFormat::NV12) {
+      std::this_thread::sleep_for(10ms);
+      continue;
+    }
+
+    if (fmt == PixelFormat::YUYV) {
+      yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()), width,
+                   height, y, u, v);
+    } else {
+      const uint8_t *src_y = reinterpret_cast<const uint8_t *>(frame.data());
+      const uint8_t *src_uv = src_y + (width * height);
+      nv12_to_i420(src_y, src_uv, width, height, width, width, y, u, v);
+    }
+
+    if (params.pixfmt == "rgb24") {
+      i420_to_rgb24(y, u, v, width, height,
+                    reinterpret_cast<uint8_t *>(payload.data()));
+    } else {
+      std::memcpy(payload.data(), i420.data(), payload.size());
+    }
+
+    if (!send_ws_binary_frame(fd, payload)) {
+      return false;
+    }
+    stream::note_frame_sent(*session, payload.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
+  }
+}
+
 void set_client_socket_options(int fd) {
 #ifdef SO_NOSIGPIPE
   int one = 1;
@@ -874,6 +944,21 @@ void WebSocketServer::handle_client(int client_fd) {
   if (!query.count("latency") && is_rtsp) {
     params.latency = "ultra";
   }
+  if (params.codec == "raw") {
+    if (params.pixfmt.empty()) {
+      params.pixfmt = "i420";
+    }
+  } else {
+    params.pixfmt.clear();
+  }
+  if (is_rtsp && params.codec == "raw") {
+    send_http_json(client_fd, 409,
+                   stream::build_error_json(
+                       "incompatible_params",
+                       "rtsp sources do not expose raw frames"));
+    close(client_fd);
+    return;
+  }
 
   const auto media_vr = adapters_.validate_request(params.media, "ws");
   if (!media_vr.ok) {
@@ -946,6 +1031,14 @@ void WebSocketServer::handle_client(int client_fd) {
   hs << "Upgrade: websocket\r\n";
   hs << "Connection: Upgrade\r\n";
   hs << "Sec-WebSocket-Accept: " << websocket_accept(sec_key) << "\r\n";
+  hs << "X-SilkCast-Width: " << session->params.width << "\r\n";
+  hs << "X-SilkCast-Height: " << session->params.height << "\r\n";
+  hs << "X-SilkCast-Fps: " << session->params.fps << "\r\n";
+  if (session->params.codec == "raw") {
+    hs << "X-SilkCast-Pixel-Format: " << session->params.pixfmt << "\r\n";
+    hs << "X-SilkCast-Frame-Bytes: "
+       << stream::raw_frame_size_bytes(session->params) << "\r\n";
+  }
   hs << "X-SilkCast-Codec: " << session->params.codec << "\r\n\r\n";
   const std::string hs_resp = hs.str();
   if (!send_all(client_fd, hs_resp.data(), hs_resp.size())) {
@@ -956,6 +1049,8 @@ void WebSocketServer::handle_client(int client_fd) {
 
   if (session->params.codec == "mjpeg") {
     (void)stream_mjpeg(client_fd, session->params, session);
+  } else if (session->params.codec == "raw") {
+    (void)stream_raw(client_fd, session->params, session);
   } else if (session->params.codec == "h264") {
     (void)stream_h264(client_fd, session->params, session);
   } else {

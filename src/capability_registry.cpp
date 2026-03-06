@@ -42,6 +42,7 @@ CapabilityRegistry::CapabilityRegistry() {
   register_container("raw");
   register_container("mp4");
 
+  register_codec("raw", true, {"raw"});
   register_codec("mjpeg", true, {"raw"});
 #ifdef HAS_OPENH264
   register_codec("h264", true, {"raw", "mp4"});

@@ -15,7 +15,8 @@ struct CaptureParams {
   int quality = 80; // JPEG quality (1-100) for MJPEG
   int gop = 30;
   std::string media = "video";   // video | audio | av
-  std::string codec = "mjpeg";   // h264 | mjpeg | h265 | av1 (reserved)
+  std::string codec = "mjpeg";   // h264 | mjpeg | raw | h265 | av1 (reserved)
+  std::string pixfmt = "";       // i420 | rgb24 (codec=raw only)
   std::string latency = "view";  // view | low | ultra
   std::string container = "raw"; // raw | mp4 (fMP4)
 };

@@ -29,6 +29,8 @@ std::string build_device_caps_json(const std::string &device_id,
 bool parse_params(const httplib::Request &req, CaptureParams &out,
                   std::string &error_json);
 void apply_latency_preset(CaptureParams &p);
+bool is_supported_raw_pixfmt(const std::string &pixfmt);
+size_t raw_frame_size_bytes(const CaptureParams &p);
 void sync_session_params(Session &session);
 void add_effective_headers(httplib::Response &res, const EffectiveParams &eff);
 void note_frame_sent(Session &session, size_t bytes, bool is_iframe = false);
@@ -45,6 +47,9 @@ void serve_mjpeg_placeholder(const CaptureParams &p, httplib::Response &res,
 void serve_mjpeg_live(const CaptureParams &p, httplib::Response &res,
                       std::shared_ptr<Session> session,
                       std::function<void(bool)> on_done);
+void serve_raw_live(const CaptureParams &p, httplib::Response &res,
+                    std::shared_ptr<Session> session,
+                    std::function<void(bool)> on_done);
 void serve_h264_live(const CaptureParams &p, httplib::Response &res,
                      std::shared_ptr<Session> session,
                      std::function<void(bool)> on_done);

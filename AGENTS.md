@@ -238,6 +238,11 @@ Entries:
   - **Why:** Keep "Just GET" behavior resilient for follow-up clients instead of hard-failing on first-comer lock differences.
   - **Impact:** Requests like `codec=h264` then `codec=mjpeg` on the same active device no longer fail with `409`; clients receive the running effective stream profile and can inspect `Effective-Params` for actual codec/container.
   - **Rollback:** Revert `src/main.cpp`, `src/ws_server.cpp`, and this `AGENTS.md` entry.
+- `[2026-03-06] [Codex] [RAW Live/WS Output]`
+  - **What changed:** Added first-class `codec=raw` registration with `container=raw`; wired local capture to negotiate raw camera frames for RAW sessions; added HTTP live multipart raw responder and websocket binary raw responder with selectable `pixfmt=i420|rgb24`; surfaced RAW capability in `/capabilities` and README; explicitly rejected `rtsp+raw` and `udp+raw` until a decode/transport story exists.
+  - **Why:** Expose the raw frame path SilkCast already had internally (`YUYV/NV12 -> I420`) without forcing clients through MJPEG or H.264 when they want inference-friendly bytes, while keeping transport shape stable for future raw formats.
+  - **Impact:** `GET /stream/live/{id}?codec=raw&container=raw&pixfmt=i420|rgb24` now returns multipart raw frames, and `ws://.../stream/ws/{id}?codec=raw&container=raw&pixfmt=i420|rgb24` now sends one raw frame per WS binary message; current scope remains local capture sources only.
+  - **Rollback:** Revert `src/capability_registry.cpp`, `src/capture_v4l2.cpp`, `src/main.cpp`, `src/stream_utils.*`, `src/ws_server.cpp`, `README.md`, and this `AGENTS.md` entry.
 
 *(New agents: append entries; do not rewrite history.)*
 
@@ -290,7 +295,7 @@ Entries:
 ---
 
 ## 8. Implementation Notes (Current)
-- Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264` → YUYV (converted to I420).
+- Capture path uses V4L2; pixel format chosen by first requester: `codec=mjpeg` → MJPEG, `codec=h264/raw` → YUYV (converted to I420).
 - RTSP input is supported via URL device IDs (`rtsp://...` encoded in path); RTSP sessions use H.264 pass-through where possible and reuse the same lazy session map/refcount cleanup semantics.
 - H.264 encoding via optional OpenH264 (Cisco binary recommended for patent coverage); Annex-B NALs streamed over HTTP chunked.
 - MJPEG and H.264 share lazy sessions; follow-up mismatched codec requests are served with first-session effective output where possible, and actual output is surfaced via `Effective-Params` instead of hard `409`.
@@ -305,7 +310,7 @@ Entries:
 - Client SDK: `client/silkcast_client.py` provided as a reference Python implementation for high-performance receiving.
 - fMP4: `/stream/live/{id}?codec=h264&container=mp4` returns chunked fragmented MP4 (tiny fragments, Baseline, IDR on join). CORS + no-store headers applied.
 - OpenH264 fetch: Enabled by default. `AUTO_FETCH_OPENH264=ON` auto-downloads Cisco v2.6.0 binary+headers on Linux x86_64/arm64; else set `OPENH264_ROOT` or system install. Disable with `-DENABLE_OPENH264=OFF` if licensing blocks usage. Future codecs (H.265/AV1) are out-of-scope for now but keep build flags flexible.
-- Current shipping focus is video stream delivery (MJPEG/H.264). Audio stream and virtual device paths are reserved in architecture and will follow the same lazy shared-session model when implemented.
-- Codec negotiation now validates against `known={mjpeg,h264,h265,av1}` and `enabled` at runtime; disabled but known codecs return structured `unsupported_codec` JSON.
+- Current shipping focus is video stream delivery (MJPEG/H.264/RAW-I420/RGB24). Audio stream and virtual device paths are reserved in architecture and will follow the same lazy shared-session model when implemented.
+- Codec negotiation now validates against `known={raw,mjpeg,h264,h265,av1}` and `enabled` at runtime; disabled but known codecs return structured `unsupported_codec` JSON.
 - Capability registration source of truth: `src/capability_registry.*` defines known/enabled codecs, container compatibility, and per-transport container rules.
 - Media/adapters registration source of truth: `src/adapter_registry.*` defines known/enabled media kinds and transport adapter availability; runtime snapshot is available at `GET /capabilities`.

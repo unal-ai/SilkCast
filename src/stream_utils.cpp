@@ -51,6 +51,20 @@ static const unsigned char kTinyJpeg[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0xFF, 0xDA, 0x00, 0x0C, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03,
     0x11, 0x00, 0x3F, 0x00, 0xFF, 0xD9};
+
+std::string normalize_raw_pixfmt(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+std::string raw_content_type(const std::string &pixfmt) {
+  if (pixfmt == "rgb24") {
+    return "video/raw; format=rgb24";
+  }
+  return "video/raw; format=i420";
+}
 } // namespace
 
 std::string json_array(const std::vector<std::string> &items) {
@@ -468,6 +482,8 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
     p.latency = req.get_param_value("latency");
   if (req.has_param("container"))
     p.container = req.get_param_value("container");
+  if (req.has_param("pixfmt"))
+    p.pixfmt = req.get_param_value("pixfmt");
   auto to_lower_copy = [](std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
       return static_cast<char>(std::tolower(c));
@@ -478,7 +494,18 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
   p.codec = to_lower_copy(p.codec);
   p.latency = to_lower_copy(p.latency);
   p.container = to_lower_copy(p.container);
+  p.pixfmt = normalize_raw_pixfmt(p.pixfmt);
   apply_latency_preset(p);
+  if (p.codec == "raw") {
+    if (p.pixfmt.empty()) {
+      p.pixfmt = "i420";
+    } else if (!is_supported_raw_pixfmt(p.pixfmt)) {
+      error_json = build_param_error_json(
+          "pixfmt", p.pixfmt, "i420|rgb24",
+          "parameter 'pixfmt' must be one of: i420, rgb24");
+      return false;
+    }
+  }
   out = std::move(p);
   return true;
 }
@@ -494,6 +521,19 @@ void apply_latency_preset(CaptureParams &p) {
       p.bitrate_kbps = 512;
     p.latency = "ultra";
   }
+}
+
+bool is_supported_raw_pixfmt(const std::string &pixfmt) {
+  return pixfmt == "i420" || pixfmt == "rgb24";
+}
+
+size_t raw_frame_size_bytes(const CaptureParams &p) {
+  const size_t width = static_cast<size_t>(std::max(0, p.width));
+  const size_t height = static_cast<size_t>(std::max(0, p.height));
+  if (p.pixfmt == "rgb24") {
+    return width * height * 3;
+  }
+  return width * height + ((width / 2) * (height / 2) * 2);
 }
 
 void sync_session_params(Session &session) {
@@ -520,7 +560,8 @@ void add_effective_headers(httplib::Response &res, const EffectiveParams &eff) {
           ";bitrate=" + std::to_string(a.bitrate_kbps) +
           ";quality=" + std::to_string(a.quality) +
           ";gop=" + std::to_string(a.gop) + ";latency=" + a.latency +
-          ";container=" + a.container);
+          ";container=" + a.container +
+          (a.pixfmt.empty() ? "" : ";pixfmt=" + a.pixfmt));
 }
 
 void note_frame_sent(Session &session, size_t bytes, bool is_iframe) {
@@ -612,6 +653,76 @@ void serve_mjpeg_live(const CaptureParams &p, httplib::Response &res,
           if (!sink.write("\r\n", 2))
             return false;
           note_frame_sent(*session, prefix.size() + frame.size() + 2);
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(frame_interval_ms));
+        }
+        return true;
+      },
+      on_done);
+}
+
+void serve_raw_live(const CaptureParams &p, httplib::Response &res,
+                    std::shared_ptr<Session> session,
+                    std::function<void(bool)> on_done) {
+  const auto boundary = "frame";
+  const size_t payload_size = raw_frame_size_bytes(p);
+  res.set_header("Connection", "close");
+  res.set_header("X-SilkCast-Pixel-Format", p.pixfmt);
+  res.set_header("X-SilkCast-Width", std::to_string(p.width));
+  res.set_header("X-SilkCast-Height", std::to_string(p.height));
+  res.set_header("X-SilkCast-Fps", std::to_string(p.fps));
+  res.set_header("X-SilkCast-Frame-Bytes", std::to_string(payload_size));
+  res.set_chunked_content_provider(
+      "multipart/x-mixed-replace; boundary=" + std::string(boundary),
+      [p, boundary, payload_size, session](size_t, httplib::DataSink &sink) mutable {
+        const int y_size = p.width * p.height;
+        const int uv_size = (p.width / 2) * (p.height / 2);
+        const int frame_interval_ms = std::max(1, 1000 / std::max(1, p.fps));
+        std::string frame;
+        std::string i420(y_size + (2 * uv_size), '\0');
+        std::string payload(payload_size, '\0');
+        uint8_t *y = reinterpret_cast<uint8_t *>(i420.data());
+        uint8_t *u = y + y_size;
+        uint8_t *v = u + uv_size;
+        const std::string prefix =
+            "--" + std::string(boundary) +
+            "\r\nContent-Type: " + raw_content_type(p.pixfmt) +
+            "\r\nContent-Length: " +
+            std::to_string(payload_size) + "\r\n\r\n";
+
+        for (;;) {
+          if (!session->capture || !session->capture->running()) {
+            std::this_thread::sleep_for(20ms);
+            continue;
+          }
+          const PixelFormat fmt = session->capture->pixel_format();
+          if ((fmt != PixelFormat::YUYV && fmt != PixelFormat::NV12) ||
+              !session->capture->latest_frame(frame)) {
+            std::this_thread::sleep_for(10ms);
+            continue;
+          }
+          if (fmt == PixelFormat::YUYV) {
+            yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
+                         p.width, p.height, y, u, v);
+          } else {
+            const uint8_t *src_y =
+                reinterpret_cast<const uint8_t *>(frame.data());
+            const uint8_t *src_uv = src_y + (p.width * p.height);
+            nv12_to_i420(src_y, src_uv, p.width, p.height, p.width, p.width,
+                         y, u, v);
+          }
+
+          if (p.pixfmt == "rgb24") {
+            i420_to_rgb24(y, u, v, p.width, p.height,
+                          reinterpret_cast<uint8_t *>(payload.data()));
+          } else {
+            std::memcpy(payload.data(), i420.data(), payload.size());
+          }
+
+          if (!sink.write(prefix.data(), prefix.size())) return false;
+          if (!sink.write(payload.data(), payload.size())) return false;
+          if (!sink.write("\r\n", 2)) return false;
+          note_frame_sent(*session, prefix.size() + payload.size() + 2);
           std::this_thread::sleep_for(
               std::chrono::milliseconds(frame_interval_ms));
         }

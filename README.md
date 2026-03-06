@@ -11,12 +11,13 @@ cmake --build build
 Endpoints (early stub):
 - `GET /device/list`
 - `GET /system/info`
-- `GET /capabilities` (single-source capability snapshot: codecs, containers, media kinds, adapter registrations)
+- `GET /capabilities` (single-source capability snapshot: codecs, containers, raw formats, media kinds, adapter registrations)
 - `GET /stream/live/{id}?media=video&codec=mjpeg&fps=15` (real V4L2 MJPEG capture; first request locks params)
+- `GET /stream/live/{id}?codec=raw&container=raw` (multipart raw frames; `pixfmt=i420|rgb24`)
 - `GET /device/{id}/caps` (native device capabilities: V4L2 formats on Linux, AVFoundation formats on macOS)
 - `GET /stream/live/{id}?codec=h264&container=mp4` (chunked fMP4: Baseline, IDR on join, tiny fragments)
 - `GET /stream/{id}/stats`
-- `ws://{host}:{ws_port}/stream/ws/{id}` and `ws://{host}:{ws_port}/stream/ws?id={id}` (binary WS frames; shared lazy session/refcount path)
+- `ws://{host}:{ws_port}/stream/ws/{id}` and `ws://{host}:{ws_port}/stream/ws?id={id}` (binary WS frames; shared lazy session/refcount path, including `codec=raw&pixfmt=i420|rgb24`)
 - `GET /stream/ws/{id}` and `GET /stream/ws?id={id}` (HTTP hint route; returns `426 upgrade_required` + `ws_url`)
 - `GET /stream/udp/{id}?target=IP&port=5000&codec=h264&duration=10` (best-effort UDP; Linux only; MTU-frag by kernel)
 - Capability negotiation uses strong central registries (`src/capability_registry.*` + `src/adapter_registry.*`), so codec/container/media/transport support is defined in one place.
@@ -32,8 +33,25 @@ Treat the RTSP URL as `{id}` and URL-encode it in the path:
 
 Notes:
 - If `{id}` starts with `rtsp://`, defaults are `codec=h264`, `container=mp4`, and ultra-latency preset unless explicitly overridden.
+- `codec=raw` is for local capture sources only; RTSP inputs stay encoded in this stack.
 - RTSP keepalive (`OPTIONS`/`GET_PARAMETER`) is sent automatically.
 - No ffmpeg/GStreamer dependency is required for the server relay pipeline.
+
+### RAW output
+- `GET /stream/live/video0?codec=raw&container=raw&pixfmt=i420&w=640&h=480&fps=30`
+  Returns `multipart/x-mixed-replace`; each part body is exactly one I420 frame.
+- `GET /stream/live/video0?codec=raw&container=raw&pixfmt=rgb24&w=640&h=480&fps=30`
+  Returns `multipart/x-mixed-replace`; each part body is exactly one packed RGB24 frame.
+- `ws://{host}:{ws_port}/stream/ws/video0?codec=raw&container=raw&pixfmt=i420&w=640&h=480&fps=30`
+  Sends one binary WebSocket message per I420 frame.
+- `ws://{host}:{ws_port}/stream/ws/video0?codec=raw&container=raw&pixfmt=rgb24&w=640&h=480&fps=30`
+  Sends one binary WebSocket message per RGB24 frame.
+- RAW sessions expose metadata via headers:
+  - `X-SilkCast-Codec: raw`
+  - `X-SilkCast-Pixel-Format: i420` or `rgb24`
+  - `X-SilkCast-Width`, `X-SilkCast-Height`, `X-SilkCast-Fps`
+  - `X-SilkCast-Frame-Bytes`
+- Current scope keeps transport shape fixed while allowing `I420` or `RGB24` payloads from local capture sources.
 
 ### Lightweight pull clients
 - `docs/pull_client.md`: Python MJPEG receiver without OpenCV/FFmpeg dependency.
@@ -51,7 +69,7 @@ Notes:
 - `--port <port>` bind port (default `8080`)
 - `--ws-port <port>` websocket sidecar port (default `port+1`, use `0` to disable)
 - `--idle-timeout <s>` idle seconds before device teardown (default `10`)
-- `--codec <mjpeg|h264>` default codec when not specified (default `mjpeg`)
+- `--codec <mjpeg|h264|raw>` default codec when not specified (default `mjpeg`)
 
 ### Desktop launcher (demo)
 `scripts/launch_desktop.sh` builds, runs, then opens the demo UI at `/`.

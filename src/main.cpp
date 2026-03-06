@@ -130,7 +130,7 @@ int main(int argc, char *argv[]) {
                    "(default port+1, 0 disables)\n"
                 << "  --idle-timeout <s>   Idle seconds before closing device "
                    "(default 10)\n"
-                << "  --codec <mjpeg|h264> Default codec if not specified "
+                << "  --codec <mjpeg|h264|raw> Default codec if not specified "
                    "(default mjpeg)\n"
                 << "  --connect <ip:port>  Run as client (pull stream from "
                    "server)\n";
@@ -230,6 +230,9 @@ int main(int argc, char *argv[]) {
                        "\"known\":" +
                            stream::json_array(registry.known_containers()) +
                            "},"
+                       "\"raw_formats\":{"
+                       "\"enabled\":[\"i420\",\"rgb24\"]"
+                       "},"
                        "\"media\":{"
                        "\"known\":" +
                            stream::json_array(adapters.known_media_kinds()) +
@@ -311,6 +314,7 @@ int main(int argc, char *argv[]) {
     add_param("codec");
     add_param("latency");
     add_param("container");
+    add_param("pixfmt");
   };
 
   api.add_route({"/stream/ws/{device}",
@@ -431,6 +435,11 @@ int main(int argc, char *argv[]) {
                              "\"codec\":\"" +
                              session->params.codec +
                              "\","
+                             "\"pixfmt\":\"" +
+                             (session->params.pixfmt.empty()
+                                  ? std::string("")
+                                  : session->params.pixfmt) +
+                             "\","
                              "\"pixel_format\":\"" +
                              std::string(stream::pixel_format_label(
                                  session->pixel_format)) +
@@ -503,7 +512,7 @@ int main(int argc, char *argv[]) {
          ParamType::Select,
          "mjpeg",
          "Video Codec",
-         {"mjpeg", "h264", "h265", "av1"}},
+         {"mjpeg", "h264", "raw", "h265", "av1"}},
         {"latency",
          ParamType::Select,
          "view",
@@ -513,7 +522,12 @@ int main(int argc, char *argv[]) {
          ParamType::Select,
          "raw",
          "Container Format",
-         {"raw", "mp4"}}},
+         {"raw", "mp4"}},
+        {"pixfmt",
+         ParamType::Select,
+         "i420",
+         "Raw Pixel Format (codec=raw only)",
+         {"i420", "rgb24"}}},
        [&sessions, &cfg, &registry, &adapters](const httplib::Request &req,
                                                 httplib::Response &res) {
          if (req.matches.size() < 2) {
@@ -537,6 +551,21 @@ int main(int argc, char *argv[]) {
            params.container = is_rtsp ? "mp4" : "raw";
          if (!req.has_param("latency") && is_rtsp)
            params.latency = "ultra";
+         if (params.codec == "raw") {
+           if (params.pixfmt.empty()) {
+             params.pixfmt = "i420";
+           }
+         } else {
+           params.pixfmt.clear();
+         }
+         if (is_rtsp && params.codec == "raw") {
+           res.status = 409;
+           res.set_content(stream::build_error_json(
+                               "incompatible_params",
+                               "rtsp sources do not expose raw frames"),
+                           "application/json");
+           return;
+         }
          if (!validate_media_params(adapters, params.media, "live", res))
            return;
          if (!validate_transport_params(registry, params, TransportKind::Live,
@@ -601,6 +630,8 @@ int main(int argc, char *argv[]) {
 
          if (effective_output.codec == "mjpeg") {
            stream::serve_mjpeg_live(effective_output, res, session, on_done);
+         } else if (effective_output.codec == "raw") {
+           stream::serve_raw_live(effective_output, res, session, on_done);
          } else if (effective_output.codec == "h264") {
            if (effective_output.container == "mp4") {
              std::string error;
@@ -697,6 +728,14 @@ int main(int argc, char *argv[]) {
            params.codec = "h264";
          if (!req.has_param("container"))
            params.container = "raw";
+         if (params.codec == "raw") {
+           res.status = 409;
+           res.set_content(stream::build_error_json(
+                               "incompatible_params",
+                               "udp transport does not expose raw frames yet"),
+                           "application/json");
+           return;
+         }
          if (!validate_media_params(adapters, params.media, "udp", res))
            return;
          if (!validate_transport_params(registry, params, TransportKind::Udp,

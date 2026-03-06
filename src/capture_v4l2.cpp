@@ -102,8 +102,9 @@ bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
   std::cerr << "Using " << (use_mmap_ ? "mmap streaming" : "read()") << "\n";
 
   // Choose pixel format based on desired codec.
-  __u32 pixfmt =
-      params.codec == "h264" ? V4L2_PIX_FMT_YUYV : V4L2_PIX_FMT_MJPEG;
+  __u32 pixfmt = (params.codec == "h264" || params.codec == "raw")
+                     ? V4L2_PIX_FMT_YUYV
+                     : V4L2_PIX_FMT_MJPEG;
   std::cerr << "Setting format: " << params.width << "x" << params.height
             << " codec=" << params.codec << " pixfmt=0x" << std::hex << pixfmt
             << std::dec << "\n";
@@ -131,9 +132,11 @@ bool CaptureV4L2::configure_device(int fd, CaptureParams &params) {
               << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
     return false;
   }
-  if (params.codec == "h264" && pixel_format_ != PixelFormat::YUYV &&
+  if ((params.codec == "h264" || params.codec == "raw") &&
+      pixel_format_ != PixelFormat::YUYV &&
       pixel_format_ != PixelFormat::NV12) {
-    std::cerr << "Device did not provide raw frames for H264, got "
+    std::cerr << "Device did not provide raw frames for codec=" << params.codec
+              << ", got "
               << fourcc_to_string(fmt.fmt.pix.pixelformat) << "\n";
     return false;
   }
