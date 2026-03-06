@@ -15,6 +15,31 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+
+bool same_capture_params(const CaptureParams &a, const CaptureParams &b) {
+  return a.width == b.width && a.height == b.height && a.fps == b.fps &&
+         a.bitrate_kbps == b.bitrate_kbps && a.quality == b.quality &&
+         a.gop == b.gop && a.media == b.media && a.codec == b.codec &&
+         a.pixfmt == b.pixfmt && a.latency == b.latency &&
+         a.container == b.container;
+}
+
+std::shared_ptr<Session> make_session(const std::string &device_id,
+                                      const CaptureParams &params) {
+  auto session = std::make_shared<Session>();
+  session->device_id = device_id;
+  session->params = params;
+  if (device_id.rfind("rtsp://", 0) == 0) {
+    session->capture = std::make_shared<CaptureRTSP>();
+  } else {
+    session->capture = std::make_shared<CaptureV4L2>();
+  }
+  return session;
+}
+
+} // namespace
+
 SessionManager::SessionManager(int idle_timeout_seconds)
     : idle_timeout_seconds_(idle_timeout_seconds),
       reaper_thread_([this] { reap_loop(); }) {}
@@ -31,16 +56,20 @@ SessionManager::get_or_create(const std::string &device_id,
   std::lock_guard<std::mutex> lock(mu_);
   auto it = sessions_.find(device_id);
   if (it != sessions_.end()) {
+    auto &existing = it->second;
+    if (!same_capture_params(existing->params, params) &&
+        existing->client_count.load() == 0) {
+      if (existing->capture) {
+        existing->capture->stop();
+      }
+      existing->state.store(SessionState::Idle);
+      existing->teardown_reason.store(TeardownReason::IdleTimeout);
+      it->second = make_session(device_id, params);
+      return it->second;
+    }
     return it->second;
   }
-  auto session = std::make_shared<Session>();
-  session->device_id = device_id;
-  session->params = params;
-  if (device_id.rfind("rtsp://", 0) == 0) {
-    session->capture = std::make_shared<CaptureRTSP>();
-  } else {
-    session->capture = std::make_shared<CaptureV4L2>();
-  }
+  auto session = make_session(device_id, params);
   sessions_[device_id] = session;
   return session;
 }

@@ -573,6 +573,24 @@ int main(int argc, char *argv[]) {
            return;
 
          auto session = sessions.get_or_create(device_id, params);
+         if (params.media != session->params.media ||
+             params.codec != session->params.codec ||
+             params.container != session->params.container ||
+             params.pixfmt != session->params.pixfmt ||
+             params.width != session->params.width ||
+             params.height != session->params.height ||
+             params.fps != session->params.fps ||
+             params.bitrate_kbps != session->params.bitrate_kbps ||
+             params.quality != session->params.quality ||
+             params.gop != session->params.gop ||
+             params.latency != session->params.latency) {
+           res.status = 409;
+           res.set_content(
+               stream::build_error_json("conflict",
+                                        "params locked by first requester"),
+               "application/json");
+           return;
+         }
          session->client_count.fetch_add(1);
          session->last_accessed = std::chrono::steady_clock::now();
          session->state.store(SessionState::Live);

@@ -975,6 +975,23 @@ void WebSocketServer::handle_client(int client_fd) {
   }
 
   auto session = sessions_.get_or_create(device_id, params);
+  if (params.media != session->params.media ||
+      params.codec != session->params.codec ||
+      params.container != session->params.container ||
+      params.pixfmt != session->params.pixfmt ||
+      params.width != session->params.width ||
+      params.height != session->params.height ||
+      params.fps != session->params.fps ||
+      params.bitrate_kbps != session->params.bitrate_kbps ||
+      params.quality != session->params.quality ||
+      params.gop != session->params.gop ||
+      params.latency != session->params.latency) {
+    send_http_json(client_fd, 409,
+                   stream::build_error_json("conflict",
+                                            "params locked by first requester"));
+    close(client_fd);
+    return;
+  }
   session->client_count.fetch_add(1);
   session->last_accessed = std::chrono::steady_clock::now();
   session->state.store(SessionState::Live);
