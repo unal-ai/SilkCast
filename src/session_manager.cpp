@@ -6,6 +6,7 @@
 
 #include "capture_avfoundation.hpp"
 #include "capture_rtsp.hpp"
+#include "stream_utils.hpp"
 #ifdef __linux__
 #include <fcntl.h>
 #include <linux/videodev2.h>
@@ -17,12 +18,15 @@ using namespace std::chrono_literals;
 
 namespace {
 
-bool same_capture_params(const CaptureParams &a, const CaptureParams &b) {
-  return a.width == b.width && a.height == b.height && a.fps == b.fps &&
-         a.bitrate_kbps == b.bitrate_kbps && a.quality == b.quality &&
-         a.gop == b.gop && a.media == b.media && a.codec == b.codec &&
-         a.pixfmt == b.pixfmt && a.latency == b.latency &&
-         a.container == b.container;
+bool same_source_params(const CaptureParams &a, const CaptureParams &b) {
+  if (a.width != b.width || a.height != b.height || a.fps != b.fps ||
+      a.media != b.media || a.codec != b.codec) {
+    return false;
+  }
+  if (a.codec == "mjpeg") {
+    return a.quality == b.quality;
+  }
+  return true;
 }
 
 std::shared_ptr<Session> make_session(const std::string &device_id,
@@ -54,22 +58,24 @@ std::shared_ptr<Session>
 SessionManager::get_or_create(const std::string &device_id,
                               const CaptureParams &params) {
   std::lock_guard<std::mutex> lock(mu_);
+  const CaptureParams source_params =
+      stream::normalize_source_params(device_id, params);
   auto it = sessions_.find(device_id);
   if (it != sessions_.end()) {
     auto &existing = it->second;
-    if (!same_capture_params(existing->params, params) &&
+    if (!same_source_params(existing->params, source_params) &&
         existing->client_count.load() == 0) {
       if (existing->capture) {
         existing->capture->stop();
       }
       existing->state.store(SessionState::Idle);
       existing->teardown_reason.store(TeardownReason::IdleTimeout);
-      it->second = make_session(device_id, params);
+      it->second = make_session(device_id, source_params);
       return it->second;
     }
     return it->second;
   }
-  auto session = make_session(device_id, params);
+  auto session = make_session(device_id, source_params);
   sessions_[device_id] = session;
   return session;
 }

@@ -13,6 +13,7 @@
 #include "capture_v4l2.hpp"
 #include "client_pull.hpp"
 #include "encoder_h264.hpp"
+#include "encoder_jpeg.hpp"
 #include "httplib.h"
 #include "index_html.hpp"
 #include "mp4_frag.hpp"
@@ -312,6 +313,7 @@ int main(int argc, char *argv[]) {
     add_param("quality");
     add_param("gop");
     add_param("codec");
+    add_param("source_codec");
     add_param("latency");
     add_param("container");
     add_param("pixfmt");
@@ -513,6 +515,11 @@ int main(int argc, char *argv[]) {
          "mjpeg",
          "Video Codec",
          {"mjpeg", "h264", "raw", "h265", "av1"}},
+        {"source_codec",
+         ParamType::Select,
+         "auto",
+         "Capture Source Family",
+         {"auto", "mjpeg", "raw"}},
         {"latency",
          ParamType::Select,
          "view",
@@ -551,6 +558,16 @@ int main(int argc, char *argv[]) {
            params.container = is_rtsp ? "mp4" : "raw";
          if (!req.has_param("latency") && is_rtsp)
            params.latency = "ultra";
+#ifndef HAS_JPEG
+         if (params.codec == "mjpeg" && params.source_codec == "raw") {
+           res.status = 409;
+           res.set_content(stream::build_error_json(
+                               "incompatible_params",
+                               "codec=mjpeg with source_codec=raw requires JPEG re-encoding, but JPEG support is not enabled in this build"),
+                           "application/json");
+           return;
+         }
+#endif
          if (params.codec == "raw") {
            if (params.pixfmt.empty()) {
              params.pixfmt = "i420";
@@ -573,17 +590,7 @@ int main(int argc, char *argv[]) {
            return;
 
          auto session = sessions.get_or_create(device_id, params);
-         if (params.media != session->params.media ||
-             params.codec != session->params.codec ||
-             params.container != session->params.container ||
-             params.pixfmt != session->params.pixfmt ||
-             params.width != session->params.width ||
-             params.height != session->params.height ||
-             params.fps != session->params.fps ||
-             params.bitrate_kbps != session->params.bitrate_kbps ||
-             params.quality != session->params.quality ||
-             params.gop != session->params.gop ||
-             params.latency != session->params.latency) {
+         if (!stream::session_can_serve_request(device_id, *session, params)) {
            res.status = 409;
            res.set_content(
                stream::build_error_json("conflict",
@@ -608,41 +615,40 @@ int main(int argc, char *argv[]) {
            detach_client();
          };
 
-         if (!session->capture->running()) {
-           session->state.store(SessionState::Warming);
-           const auto warming_started_at = std::chrono::steady_clock::now();
-           if (!session->capture->start(device_id, session->params)) {
-             res.status = 503;
-             res.set_content(stream::build_error_json("device_unavailable",
-                                                      "failed to open camera"),
-                             "application/json");
-             session->state.store(SessionState::Idle);
-             session->teardown_reason.store(TeardownReason::OpenFailed);
-             detach_client();
-             return;
+         {
+           std::lock_guard<std::mutex> lifecycle_lock(session->lifecycle_mu);
+           if (!session->capture->running()) {
+             session->state.store(SessionState::Warming);
+             const auto warming_started_at = std::chrono::steady_clock::now();
+             if (!session->capture->start(device_id, session->params)) {
+               res.status = 503;
+               res.set_content(stream::build_error_json("device_unavailable",
+                                                        "failed to open camera"),
+                               "application/json");
+               session->state.store(SessionState::Idle);
+               session->teardown_reason.store(TeardownReason::OpenFailed);
+               detach_client();
+               return;
+             }
+             stream::sync_session_params(*session);
+             session->started = std::chrono::steady_clock::now();
+             session->frames_sent = 0;
+             session->bytes_sent = 0;
+             session->startup_ms.store(static_cast<uint64_t>(
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     session->started - warming_started_at)
+                     .count()));
+             session->first_frame_ms.store(0);
+             session->first_frame_marked.store(false);
+             session->first_iframe_ms.store(0);
+             session->first_iframe_marked.store(false);
+             session->state.store(SessionState::Live);
+             session->teardown_reason.store(TeardownReason::None);
            }
-           stream::sync_session_params(*session);
-           session->started = std::chrono::steady_clock::now();
-           session->frames_sent = 0;
-           session->bytes_sent = 0;
-           session->startup_ms.store(static_cast<uint64_t>(
-               std::chrono::duration_cast<std::chrono::milliseconds>(
-                   session->started - warming_started_at)
-                   .count()));
-           session->first_frame_ms.store(0);
-           session->first_frame_marked.store(false);
-           session->first_iframe_ms.store(0);
-           session->first_iframe_marked.store(false);
-           session->state.store(SessionState::Live);
-           session->teardown_reason.store(TeardownReason::None);
          }
 
-         CaptureParams effective_output = session->params;
-         if (effective_output.codec == "h264" && params.container == "mp4") {
-           effective_output.container = "mp4";
-         } else {
-           effective_output.container = "raw";
-         }
+         CaptureParams effective_output =
+             stream::derive_effective_output_params(*session, params);
          EffectiveParams eff_actual{params, effective_output};
          stream::add_effective_headers(res, eff_actual);
 
@@ -693,7 +699,12 @@ int main(int argc, char *argv[]) {
         {"bitrate", ParamType::Int, "2000", "Bitrate (kbps)"},
         {"quality", ParamType::Int, "80", "JPEG quality (1-100, MJPEG only)"},
         {"gop", ParamType::Int, "30", "GOP Size"},
-        {"codec", ParamType::Select, "h264", "Video Codec", {"h264", "mjpeg"}}},
+        {"codec", ParamType::Select, "h264", "Video Codec", {"h264", "mjpeg"}},
+        {"source_codec",
+         ParamType::Select,
+         "auto",
+         "Capture Source Family",
+         {"auto", "mjpeg", "raw"}}},
        [&sessions, &registry, &adapters](const httplib::Request &req,
                                          httplib::Response &res) {
 #ifdef __linux__
@@ -744,6 +755,16 @@ int main(int argc, char *argv[]) {
            params.media = "video";
          if (!req.has_param("codec"))
            params.codec = "h264";
+#ifndef HAS_JPEG
+         if (params.codec == "mjpeg" && params.source_codec == "raw") {
+           res.status = 409;
+           res.set_content(stream::build_error_json(
+                               "incompatible_params",
+                               "codec=mjpeg with source_codec=raw requires JPEG re-encoding, but JPEG support is not enabled in this build"),
+                           "application/json");
+           return;
+         }
+#endif
          if (!req.has_param("container"))
            params.container = "raw";
          if (params.codec == "raw") {
@@ -774,9 +795,7 @@ int main(int argc, char *argv[]) {
            sessions.release_if_idle(device_id);
          };
 
-         if (params.media != session->params.media ||
-             params.codec != session->params.codec ||
-             params.container != session->params.container) {
+         if (!stream::session_can_serve_request(device_id, *session, params)) {
            res.status = 409;
            res.set_content(stream::build_error_json(
                                "conflict", "params locked by first requester"),
@@ -785,36 +804,42 @@ int main(int argc, char *argv[]) {
            return;
          }
 
-         if (!session->capture->running()) {
-           session->state.store(SessionState::Warming);
-           const auto warming_started_at = std::chrono::steady_clock::now();
-           if (!session->capture->start(device_id, session->params)) {
-             res.status = 503;
-             res.set_content(stream::build_error_json("device_unavailable",
-                                                      "failed to open camera"),
-                             "application/json");
-             session->state.store(SessionState::Idle);
-             session->teardown_reason.store(TeardownReason::OpenFailed);
-             detach_client();
-             return;
+         {
+           std::lock_guard<std::mutex> lifecycle_lock(session->lifecycle_mu);
+           if (!session->capture->running()) {
+             session->state.store(SessionState::Warming);
+             const auto warming_started_at = std::chrono::steady_clock::now();
+             if (!session->capture->start(device_id, session->params)) {
+               res.status = 503;
+               res.set_content(stream::build_error_json("device_unavailable",
+                                                        "failed to open camera"),
+                               "application/json");
+               session->state.store(SessionState::Idle);
+               session->teardown_reason.store(TeardownReason::OpenFailed);
+               detach_client();
+               return;
+             }
+             stream::sync_session_params(*session);
+             session->started = std::chrono::steady_clock::now();
+             session->frames_sent = 0;
+             session->bytes_sent = 0;
+             session->startup_ms.store(static_cast<uint64_t>(
+                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                     session->started - warming_started_at)
+                     .count()));
+             session->first_frame_ms.store(0);
+             session->first_frame_marked.store(false);
+             session->first_iframe_ms.store(0);
+             session->first_iframe_marked.store(false);
+             session->state.store(SessionState::Live);
+             session->teardown_reason.store(TeardownReason::None);
            }
-           stream::sync_session_params(*session);
-           session->started = std::chrono::steady_clock::now();
-           session->frames_sent = 0;
-           session->bytes_sent = 0;
-           session->startup_ms.store(static_cast<uint64_t>(
-               std::chrono::duration_cast<std::chrono::milliseconds>(
-                   session->started - warming_started_at)
-                   .count()));
-           session->first_frame_ms.store(0);
-           session->first_frame_marked.store(false);
-           session->first_iframe_ms.store(0);
-           session->first_iframe_marked.store(false);
-           session->state.store(SessionState::Live);
-           session->teardown_reason.store(TeardownReason::None);
          }
 
-         std::thread([session, params, target, port, duration_sec,
+         CaptureParams effective_output =
+             stream::derive_effective_output_params(*session, params);
+
+         std::thread([session, effective_output, target, port, duration_sec,
                       detach_client]() {
            int sock = socket(AF_INET, SOCK_DGRAM, 0);
            if (sock < 0) {
@@ -834,18 +859,21 @@ int main(int argc, char *argv[]) {
 
            std::string frame;
            std::string yuv;
-           const int y_size = params.width * params.height;
-           const int uv_size = (params.width / 2) * (params.height / 2);
+           std::string mjpeg_buf;
+           const int y_size = effective_output.width * effective_output.height;
+           const int uv_size =
+               (effective_output.width / 2) * (effective_output.height / 2);
            yuv.resize(y_size + 2 * uv_size);
            uint8_t *y = reinterpret_cast<uint8_t *>(yuv.data());
            uint8_t *u = y + y_size;
            uint8_t *v = u + uv_size;
+           JpegFrameEncoder jpeg_encoder;
            bool first = true;
 #ifdef HAS_OPENH264
            H264Encoder encoder;
            bool encoder_ready = false;
-           if (params.codec == "h264") {
-             if (!encoder.init(session->params))
+           if (effective_output.codec == "h264") {
+             if (!encoder.init(effective_output))
                encoder_ready = false;
              else {
                encoder.force_idr();
@@ -858,7 +886,7 @@ int main(int argc, char *argv[]) {
            auto start = std::chrono::steady_clock::now();
            uint32_t last_idr = session->idr_request_seq.load();
            const int frame_interval_ms =
-               std::max(1, 1000 / std::max(1, params.fps));
+               std::max(1, 1000 / std::max(1, effective_output.fps));
            const size_t mtu = 1400;
            uint32_t frame_sequence = 0;
 
@@ -893,10 +921,19 @@ int main(int argc, char *argv[]) {
              size_t p_size = 0;
              std::string h264_buf;
 
-             if (params.codec == "mjpeg") {
-               p_data = reinterpret_cast<const uint8_t *>(frame.data());
-               p_size = frame.size();
-             } else if (params.codec == "h264") {
+             if (effective_output.codec == "mjpeg") {
+               const PixelFormat fmt = session->capture->pixel_format();
+               if ((fmt != PixelFormat::MJPEG && fmt != PixelFormat::YUYV &&
+                    fmt != PixelFormat::NV12) ||
+                   !jpeg_encoder.encode(fmt, frame, effective_output.width,
+                                        effective_output.height,
+                                        effective_output.quality, mjpeg_buf)) {
+                 std::this_thread::sleep_for(5ms);
+                 continue;
+               }
+               p_data = reinterpret_cast<const uint8_t *>(mjpeg_buf.data());
+               p_size = mjpeg_buf.size();
+             } else if (effective_output.codec == "h264") {
 #ifdef HAS_OPENH264
                if (!encoder_ready)
                  break;
@@ -907,13 +944,17 @@ int main(int argc, char *argv[]) {
                }
                if (fmt == PixelFormat::YUYV) {
                  yuyv_to_i420(reinterpret_cast<const uint8_t *>(frame.data()),
-                              params.width, params.height, y, u, v);
+                              effective_output.width,
+                              effective_output.height, y, u, v);
                } else {
                  const uint8_t *src_y =
                      reinterpret_cast<const uint8_t *>(frame.data());
-                 const uint8_t *src_uv = src_y + (params.width * params.height);
-                 nv12_to_i420(src_y, src_uv, params.width, params.height,
-                              params.width, params.width, y, u, v);
+                 const uint8_t *src_uv =
+                     src_y +
+                     (effective_output.width * effective_output.height);
+                 nv12_to_i420(src_y, src_uv, effective_output.width,
+                              effective_output.height, effective_output.width,
+                              effective_output.width, y, u, v);
                }
                if (first) {
                  encoder.force_idr();

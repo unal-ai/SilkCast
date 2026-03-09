@@ -28,6 +28,7 @@
 #include "api_router.hpp"
 #include "capture_v4l2.hpp"
 #include "encoder_h264.hpp"
+#include "encoder_jpeg.hpp"
 #include "mp4_frag.hpp"
 #include "types.hpp"
 #include "yuv_convert.hpp"
@@ -478,6 +479,8 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
     p.media = req.get_param_value("media");
   if (req.has_param("codec"))
     p.codec = req.get_param_value("codec");
+  if (req.has_param("source_codec"))
+    p.source_codec = req.get_param_value("source_codec");
   if (req.has_param("latency"))
     p.latency = req.get_param_value("latency");
   if (req.has_param("container"))
@@ -492,9 +495,19 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
   };
   p.media = to_lower_copy(p.media);
   p.codec = to_lower_copy(p.codec);
+  p.source_codec = to_lower_copy(p.source_codec);
   p.latency = to_lower_copy(p.latency);
   p.container = to_lower_copy(p.container);
   p.pixfmt = normalize_raw_pixfmt(p.pixfmt);
+  if (p.source_codec == "auto")
+    p.source_codec.clear();
+  if (!p.source_codec.empty() && p.source_codec != "mjpeg" &&
+      p.source_codec != "raw") {
+    error_json = build_param_error_json(
+        "source_codec", p.source_codec, "auto|mjpeg|raw",
+        "parameter 'source_codec' must be one of: auto, mjpeg, raw");
+    return false;
+  }
   apply_latency_preset(p);
   if (p.codec == "raw") {
     if (p.pixfmt.empty()) {
@@ -534,6 +547,83 @@ size_t raw_frame_size_bytes(const CaptureParams &p) {
     return width * height * 3;
   }
   return width * height + ((width / 2) * (height / 2) * 2);
+}
+
+CaptureParams normalize_source_params(const std::string &device_id,
+                                      const CaptureParams &requested) {
+  CaptureParams source = requested;
+  const bool is_rtsp = device_id.rfind("rtsp://", 0) == 0;
+  if (is_rtsp) {
+    source.codec = "h264";
+  } else if (!requested.source_codec.empty()) {
+    source.codec = requested.source_codec;
+  } else if (requested.codec == "mjpeg") {
+    source.codec = "mjpeg";
+  } else {
+    source.codec = "raw";
+  }
+  source.source_codec.clear();
+  source.pixfmt.clear();
+  source.container = "raw";
+  if (source.codec != "mjpeg") {
+    source.quality = 80;
+  }
+  source.bitrate_kbps = 256;
+  source.gop = 30;
+  source.latency = "view";
+  return source;
+}
+
+bool session_can_serve_request(const std::string &device_id,
+                               const Session &session,
+                               const CaptureParams &requested) {
+  const CaptureParams requested_source =
+      normalize_source_params(device_id, requested);
+  const CaptureParams &active_source = session.params;
+  const bool same_source =
+      requested_source.width == active_source.width &&
+      requested_source.height == active_source.height &&
+      requested_source.fps == active_source.fps &&
+      requested_source.media == active_source.media &&
+      requested_source.codec == active_source.codec &&
+      (requested_source.codec != "mjpeg" ||
+       requested_source.quality == active_source.quality);
+  if (!same_source) {
+    return false;
+  }
+  if (device_id.rfind("rtsp://", 0) == 0) {
+    return requested.codec == "h264";
+  }
+  if (active_source.codec == "raw") {
+    return requested.codec == "raw" || requested.codec == "h264" ||
+           requested.codec == "mjpeg";
+  }
+  if (active_source.codec == "mjpeg") {
+    return requested.codec == "mjpeg";
+  }
+  if (active_source.codec == "h264") {
+    return requested.codec == "h264";
+  }
+  return false;
+}
+
+CaptureParams derive_effective_output_params(const Session &session,
+                                             const CaptureParams &requested) {
+  CaptureParams effective = requested;
+  effective.width = session.params.width;
+  effective.height = session.params.height;
+  effective.fps = session.params.fps;
+  if (effective.codec == "h264" && requested.container == "mp4") {
+    effective.container = "mp4";
+  } else {
+    effective.container = "raw";
+  }
+  if (effective.codec != "raw") {
+    effective.pixfmt.clear();
+  } else if (effective.pixfmt.empty()) {
+    effective.pixfmt = "i420";
+  }
+  return effective;
 }
 
 void sync_session_params(Session &session) {
@@ -631,28 +721,37 @@ void serve_mjpeg_live(const CaptureParams &p, httplib::Response &res,
       "multipart/x-mixed-replace; boundary=" + std::string(boundary),
       [p, boundary, session](size_t, httplib::DataSink &sink) mutable {
         const int frame_interval_ms = std::max(1, 1000 / std::max(1, p.fps));
+        JpegFrameEncoder jpeg_encoder;
         std::string prefix;
         std::string frame;
+        std::string jpeg_frame;
         for (;;) {
           if (!session->capture || !session->capture->running()) {
             std::this_thread::sleep_for(20ms);
             continue;
           }
-          if (session->capture->pixel_format() != PixelFormat::MJPEG ||
+          const PixelFormat fmt = session->capture->pixel_format();
+          if ((fmt != PixelFormat::MJPEG && fmt != PixelFormat::YUYV &&
+               fmt != PixelFormat::NV12) ||
               !session->capture->latest_frame(frame)) {
             std::this_thread::sleep_for(10ms);
             continue;
           }
+          if (!jpeg_encoder.encode(fmt, frame, p.width, p.height, p.quality,
+                                   jpeg_frame)) {
+            std::this_thread::sleep_for(5ms);
+            continue;
+          }
           prefix = "--" + std::string(boundary) +
                    "\r\nContent-Type: image/jpeg\r\nContent-Length: " +
-                   std::to_string(frame.size()) + "\r\n\r\n";
+                   std::to_string(jpeg_frame.size()) + "\r\n\r\n";
           if (!sink.write(prefix.data(), prefix.size()))
             return false;
-          if (!sink.write(frame.data(), frame.size()))
+          if (!sink.write(jpeg_frame.data(), jpeg_frame.size()))
             return false;
           if (!sink.write("\r\n", 2))
             return false;
-          note_frame_sent(*session, prefix.size() + frame.size() + 2);
+          note_frame_sent(*session, prefix.size() + jpeg_frame.size() + 2);
           std::this_thread::sleep_for(
               std::chrono::milliseconds(frame_interval_ms));
         }
@@ -746,7 +845,7 @@ void serve_h264_live(const CaptureParams &p, httplib::Response &res,
             session->capture->pixel_format() == PixelFormat::H264;
         bool encoder_ready = passthrough;
         if (!passthrough) {
-          if (!encoder.init(session->params)) {
+          if (!encoder.init(p)) {
             return false;
           }
           encoder.force_idr();
@@ -850,7 +949,7 @@ void serve_fmp4_live(const CaptureParams &p, httplib::Response &res,
             session->capture &&
             session->capture->pixel_format() == PixelFormat::H264;
         if (!passthrough) {
-          if (!encoder.init(session->params)) return false;
+          if (!encoder.init(p)) return false;
           encoder.force_idr();
         }
 

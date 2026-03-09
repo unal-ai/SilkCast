@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@ struct CaptureParams {
   int gop = 30;
   std::string media = "video";   // video | audio | av
   std::string codec = "mjpeg";   // h264 | mjpeg | raw | h265 | av1 (reserved)
+  std::string source_codec = ""; // auto | mjpeg | raw (capture family hint)
   std::string pixfmt = "";       // i420 | rgb24 (codec=raw only)
   std::string latency = "view";  // view | low | ultra
   std::string container = "raw"; // raw | mp4 (fMP4)
@@ -85,6 +87,7 @@ struct Session {
   std::atomic<bool> first_frame_marked{false};
   std::atomic<bool> first_iframe_marked{false};
   std::atomic<uint32_t> idr_request_seq{0};
+  mutable std::mutex lifecycle_mu;
 };
 
 #pragma pack(push, 1)

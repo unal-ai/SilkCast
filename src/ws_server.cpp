@@ -19,6 +19,7 @@
 #include "api_router.hpp"
 #include "capability_registry.hpp"
 #include "encoder_h264.hpp"
+#include "encoder_jpeg.hpp"
 #include "session_manager.hpp"
 #include "stream_utils.hpp"
 #include "types.hpp"
@@ -351,6 +352,10 @@ bool parse_capture_params(const QueryMap &query, CaptureParams &out,
   if (codec_it != query.end()) {
     params.codec = codec_it->second;
   }
+  const auto source_codec_it = query.find("source_codec");
+  if (source_codec_it != query.end()) {
+    params.source_codec = source_codec_it->second;
+  }
   const auto latency_it = query.find("latency");
   if (latency_it != query.end()) {
     params.latency = latency_it->second;
@@ -366,9 +371,20 @@ bool parse_capture_params(const QueryMap &query, CaptureParams &out,
 
   params.media = to_lower_copy(params.media);
   params.codec = to_lower_copy(params.codec);
+  params.source_codec = to_lower_copy(params.source_codec);
   params.latency = to_lower_copy(params.latency);
   params.container = to_lower_copy(params.container);
   params.pixfmt = to_lower_copy(params.pixfmt);
+  if (params.source_codec == "auto") {
+    params.source_codec.clear();
+  }
+  if (!params.source_codec.empty() && params.source_codec != "mjpeg" &&
+      params.source_codec != "raw") {
+    error_json = build_param_error_json(
+        "source_codec", params.source_codec, "auto|mjpeg|raw",
+        "parameter 'source_codec' must be one of: auto, mjpeg, raw");
+    return false;
+  }
   stream::apply_latency_preset(params);
   if (params.codec == "raw") {
     if (params.pixfmt.empty()) {
@@ -582,21 +598,30 @@ bool send_ws_binary_frame(int fd, const std::string &payload) {
 bool stream_mjpeg(int fd, const CaptureParams &params,
                   const std::shared_ptr<Session> &session) {
   const int frame_interval_ms = std::max(1, 1000 / std::max(1, params.fps));
+  JpegFrameEncoder jpeg_encoder;
   std::string frame;
+  std::string jpeg_frame;
   while (true) {
     if (!session->capture || !session->capture->running()) {
       std::this_thread::sleep_for(20ms);
       continue;
     }
-    if (session->capture->pixel_format() != PixelFormat::MJPEG ||
+    const PixelFormat fmt = session->capture->pixel_format();
+    if ((fmt != PixelFormat::MJPEG && fmt != PixelFormat::YUYV &&
+         fmt != PixelFormat::NV12) ||
         !session->capture->latest_frame(frame)) {
       std::this_thread::sleep_for(10ms);
       continue;
     }
-    if (!send_ws_binary_frame(fd, frame)) {
+    if (!jpeg_encoder.encode(fmt, frame, params.width, params.height,
+                             params.quality, jpeg_frame)) {
+      std::this_thread::sleep_for(5ms);
+      continue;
+    }
+    if (!send_ws_binary_frame(fd, jpeg_frame)) {
       return false;
     }
-    stream::note_frame_sent(*session, frame.size());
+    stream::note_frame_sent(*session, jpeg_frame.size());
     std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
   }
 }
@@ -944,6 +969,16 @@ void WebSocketServer::handle_client(int client_fd) {
   if (!query.count("latency") && is_rtsp) {
     params.latency = "ultra";
   }
+#ifndef HAS_JPEG
+  if (params.codec == "mjpeg" && params.source_codec == "raw") {
+    send_http_json(client_fd, 409,
+                   stream::build_error_json(
+                       "incompatible_params",
+                       "codec=mjpeg with source_codec=raw requires JPEG re-encoding, but JPEG support is not enabled in this build"));
+    close(client_fd);
+    return;
+  }
+#endif
   if (params.codec == "raw") {
     if (params.pixfmt.empty()) {
       params.pixfmt = "i420";
@@ -975,17 +1010,7 @@ void WebSocketServer::handle_client(int client_fd) {
   }
 
   auto session = sessions_.get_or_create(device_id, params);
-  if (params.media != session->params.media ||
-      params.codec != session->params.codec ||
-      params.container != session->params.container ||
-      params.pixfmt != session->params.pixfmt ||
-      params.width != session->params.width ||
-      params.height != session->params.height ||
-      params.fps != session->params.fps ||
-      params.bitrate_kbps != session->params.bitrate_kbps ||
-      params.quality != session->params.quality ||
-      params.gop != session->params.gop ||
-      params.latency != session->params.latency) {
+  if (!stream::session_can_serve_request(device_id, *session, params)) {
     send_http_json(client_fd, 409,
                    stream::build_error_json("conflict",
                                             "params locked by first requester"));
@@ -1010,36 +1035,42 @@ void WebSocketServer::handle_client(int client_fd) {
     attached = false;
   };
 
-  if (!session->capture->running()) {
-    session->state.store(SessionState::Warming);
-    const auto warming_started_at = std::chrono::steady_clock::now();
-    if (!session->capture->start(device_id, session->params)) {
-      send_http_json(client_fd, 503,
-                     stream::build_error_json("device_unavailable",
-                                              "failed to open camera"));
-      session->state.store(SessionState::Idle);
-      session->teardown_reason.store(TeardownReason::OpenFailed);
-      detach_client();
-      close(client_fd);
-      return;
+  {
+    std::lock_guard<std::mutex> lifecycle_lock(session->lifecycle_mu);
+    if (!session->capture->running()) {
+      session->state.store(SessionState::Warming);
+      const auto warming_started_at = std::chrono::steady_clock::now();
+      if (!session->capture->start(device_id, session->params)) {
+        send_http_json(client_fd, 503,
+                       stream::build_error_json("device_unavailable",
+                                                "failed to open camera"));
+        session->state.store(SessionState::Idle);
+        session->teardown_reason.store(TeardownReason::OpenFailed);
+        detach_client();
+        close(client_fd);
+        return;
+      }
+      stream::sync_session_params(*session);
+      session->started = std::chrono::steady_clock::now();
+      session->frames_sent.store(0);
+      session->bytes_sent.store(0);
+      session->startup_ms.store(static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              session->started - warming_started_at)
+              .count()));
+      session->first_frame_ms.store(0);
+      session->first_frame_marked.store(false);
+      session->first_iframe_ms.store(0);
+      session->first_iframe_marked.store(false);
+      session->state.store(SessionState::Live);
+      session->teardown_reason.store(TeardownReason::None);
     }
-    stream::sync_session_params(*session);
-    session->started = std::chrono::steady_clock::now();
-    session->frames_sent.store(0);
-    session->bytes_sent.store(0);
-    session->startup_ms.store(static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            session->started - warming_started_at)
-            .count()));
-    session->first_frame_ms.store(0);
-    session->first_frame_marked.store(false);
-    session->first_iframe_ms.store(0);
-    session->first_iframe_marked.store(false);
-    session->state.store(SessionState::Live);
-    session->teardown_reason.store(TeardownReason::None);
   }
 
-  if (session->params.codec == "h264") {
+  const CaptureParams effective_output =
+      stream::derive_effective_output_params(*session, params);
+
+  if (effective_output.codec == "h264") {
     session->idr_request_seq.fetch_add(1);
   }
 
@@ -1048,15 +1079,15 @@ void WebSocketServer::handle_client(int client_fd) {
   hs << "Upgrade: websocket\r\n";
   hs << "Connection: Upgrade\r\n";
   hs << "Sec-WebSocket-Accept: " << websocket_accept(sec_key) << "\r\n";
-  hs << "X-SilkCast-Width: " << session->params.width << "\r\n";
-  hs << "X-SilkCast-Height: " << session->params.height << "\r\n";
-  hs << "X-SilkCast-Fps: " << session->params.fps << "\r\n";
-  if (session->params.codec == "raw") {
-    hs << "X-SilkCast-Pixel-Format: " << session->params.pixfmt << "\r\n";
+  hs << "X-SilkCast-Width: " << effective_output.width << "\r\n";
+  hs << "X-SilkCast-Height: " << effective_output.height << "\r\n";
+  hs << "X-SilkCast-Fps: " << effective_output.fps << "\r\n";
+  if (effective_output.codec == "raw") {
+    hs << "X-SilkCast-Pixel-Format: " << effective_output.pixfmt << "\r\n";
     hs << "X-SilkCast-Frame-Bytes: "
-       << stream::raw_frame_size_bytes(session->params) << "\r\n";
+       << stream::raw_frame_size_bytes(effective_output) << "\r\n";
   }
-  hs << "X-SilkCast-Codec: " << session->params.codec << "\r\n\r\n";
+  hs << "X-SilkCast-Codec: " << effective_output.codec << "\r\n\r\n";
   const std::string hs_resp = hs.str();
   if (!send_all(client_fd, hs_resp.data(), hs_resp.size())) {
     detach_client();
@@ -1064,12 +1095,12 @@ void WebSocketServer::handle_client(int client_fd) {
     return;
   }
 
-  if (session->params.codec == "mjpeg") {
-    (void)stream_mjpeg(client_fd, session->params, session);
-  } else if (session->params.codec == "raw") {
-    (void)stream_raw(client_fd, session->params, session);
-  } else if (session->params.codec == "h264") {
-    (void)stream_h264(client_fd, session->params, session);
+  if (effective_output.codec == "mjpeg") {
+    (void)stream_mjpeg(client_fd, effective_output, session);
+  } else if (effective_output.codec == "raw") {
+    (void)stream_raw(client_fd, effective_output, session);
+  } else if (effective_output.codec == "h264") {
+    (void)stream_h264(client_fd, effective_output, session);
   } else {
     session->teardown_reason.store(TeardownReason::RuntimeError);
   }

@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(FetchContent)
 include(CheckIncludeFileCXX)
 include(CheckSymbolExists)
+find_package(JPEG QUIET)
 
 FetchContent_Declare(
   cpp-httplib
@@ -96,6 +97,14 @@ else()
   set(HAS_OPENH264 FALSE)
 endif()
 
+if(JPEG_FOUND)
+  message(STATUS "Found JPEG: ${JPEG_LIBRARIES}")
+  set(HAS_JPEG TRUE)
+else()
+  message(WARNING "JPEG library not found; raw->mjpeg re-encoding will be unavailable.")
+  set(HAS_JPEG FALSE)
+endif()
+
 set(SILKCAST_SOURCES
   src/main.cpp
   src/capability_registry.cpp
@@ -117,6 +126,8 @@ set(SILKCAST_SOURCES
   src/stream_utils.hpp
   src/encoder_h264.cpp
   src/encoder_h264.hpp
+  src/encoder_jpeg.cpp
+  src/encoder_jpeg.hpp
   src/mp4_frag.cpp
   src/mp4_frag.hpp
   src/yuv_convert.hpp
@@ -147,6 +158,20 @@ if(HAS_OPENH264)
       BUILD_RPATH ${OPENH264_LIBRARY_DIR}
       INSTALL_RPATH ${OPENH264_LIBRARY_DIR}
     )
+  endif()
+endif()
+
+if(HAS_JPEG)
+  target_compile_definitions(silkcast PRIVATE HAS_JPEG=1)
+  if(TARGET JPEG::JPEG)
+    target_link_libraries(silkcast PRIVATE JPEG::JPEG)
+  else()
+    if(JPEG_INCLUDE_DIRS)
+      target_include_directories(silkcast PRIVATE ${JPEG_INCLUDE_DIRS})
+    elseif(JPEG_INCLUDE_DIR)
+      target_include_directories(silkcast PRIVATE ${JPEG_INCLUDE_DIR})
+    endif()
+    target_link_libraries(silkcast PRIVATE ${JPEG_LIBRARIES})
   endif()
 endif()
 

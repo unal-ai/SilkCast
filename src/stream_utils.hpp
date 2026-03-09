@@ -31,6 +31,13 @@ bool parse_params(const httplib::Request &req, CaptureParams &out,
 void apply_latency_preset(CaptureParams &p);
 bool is_supported_raw_pixfmt(const std::string &pixfmt);
 size_t raw_frame_size_bytes(const CaptureParams &p);
+CaptureParams normalize_source_params(const std::string &device_id,
+                                      const CaptureParams &requested);
+bool session_can_serve_request(const std::string &device_id,
+                               const Session &session,
+                               const CaptureParams &requested);
+CaptureParams derive_effective_output_params(const Session &session,
+                                             const CaptureParams &requested);
 void sync_session_params(Session &session);
 void add_effective_headers(httplib::Response &res, const EffectiveParams &eff);
 void note_frame_sent(Session &session, size_t bytes, bool is_iframe = false);
