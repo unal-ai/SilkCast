@@ -243,6 +243,11 @@ Entries:
   - **Why:** Expose the raw frame path SilkCast already had internally (`YUYV/NV12 -> I420`) without forcing clients through MJPEG or H.264 when they want inference-friendly bytes, while keeping transport shape stable for future raw formats.
   - **Impact:** `GET /stream/live/{id}?codec=raw&container=raw&pixfmt=i420|rgb24` now returns multipart raw frames, and `ws://.../stream/ws/{id}?codec=raw&container=raw&pixfmt=i420|rgb24` now sends one raw frame per WS binary message; current scope remains local capture sources only.
   - **Rollback:** Revert `src/capability_registry.cpp`, `src/capture_v4l2.cpp`, `src/main.cpp`, `src/stream_utils.*`, `src/ws_server.cpp`, `README.md`, and this `AGENTS.md` entry.
+- `[2026-03-18] [Codex] [Raw Session FPS Reuse]`
+  - **What changed:** Relaxed live-session reuse for raw-backed sources so later consumers can attach at a lower or equal FPS without hitting `409 params locked by first requester`; `derive_effective_output_params()` now preserves `min(requested_fps, source_fps)` for reused clients instead of forcing the source session FPS into all outputs.
+  - **Why:** The previous exact-FPS lock broke the intended model where one raw source session feeds multiple consumers with different pacing, such as browser preview at `15 FPS` and inference at `10 FPS`.
+  - **Impact:** A device already serving `mjpeg@15` from a raw-backed source can now also serve `raw@10` on the same live session, and the second client sees `Effective-Params ... fps=10` / `X-SilkCast-Fps: 10` instead of a `409 conflict`.
+  - **Rollback:** Revert `src/stream_utils.cpp` and this `AGENTS.md` entry.
 
 *(New agents: append entries; do not rewrite history.)*
 

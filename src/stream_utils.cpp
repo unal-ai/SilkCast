@@ -558,7 +558,14 @@ CaptureParams normalize_source_params(const std::string &device_id,
   } else if (!requested.source_codec.empty()) {
     source.codec = requested.source_codec;
   } else if (requested.codec == "mjpeg") {
+    // When JPEG re-encoding is available, prefer a raw-backed source for the
+    // default "auto" MJPEG path. Explicit source_codec=mjpeg still preserves
+    // true passthrough for clients that want camera-native MJPEG.
+#ifdef HAS_JPEG
+    source.codec = "raw";
+#else
     source.codec = "mjpeg";
+#endif
   } else {
     source.codec = "raw";
   }
@@ -580,13 +587,22 @@ bool session_can_serve_request(const std::string &device_id,
   const CaptureParams requested_source =
       normalize_source_params(device_id, requested);
   const CaptureParams &active_source = session.params;
+  const bool auto_mjpeg_can_reuse_raw_source =
+      requested.source_codec.empty() && requested.codec == "mjpeg" &&
+      active_source.codec == "raw";
+  const bool fps_compatible =
+      requested_source.fps == active_source.fps ||
+      (active_source.codec == "raw" && requested_source.fps > 0 &&
+       requested_source.fps <= active_source.fps);
   const bool same_source =
       requested_source.width == active_source.width &&
       requested_source.height == active_source.height &&
-      requested_source.fps == active_source.fps &&
+      fps_compatible &&
       requested_source.media == active_source.media &&
-      requested_source.codec == active_source.codec &&
+      (requested_source.codec == active_source.codec ||
+       auto_mjpeg_can_reuse_raw_source) &&
       (requested_source.codec != "mjpeg" ||
+       auto_mjpeg_can_reuse_raw_source ||
        requested_source.quality == active_source.quality);
   if (!same_source) {
     return false;
@@ -612,7 +628,11 @@ CaptureParams derive_effective_output_params(const Session &session,
   CaptureParams effective = requested;
   effective.width = session.params.width;
   effective.height = session.params.height;
-  effective.fps = session.params.fps;
+  if (requested.fps > 0 && session.params.fps > 0) {
+    effective.fps = std::min(requested.fps, session.params.fps);
+  } else {
+    effective.fps = session.params.fps;
+  }
   if (effective.codec == "h264" && requested.container == "mp4") {
     effective.container = "mp4";
   } else {
