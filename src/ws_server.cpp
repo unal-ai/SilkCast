@@ -598,6 +598,8 @@ bool send_ws_binary_frame(int fd, const std::string &payload) {
 bool stream_mjpeg(int fd, const CaptureParams &params,
                   const std::shared_ptr<Session> &session) {
   const int frame_interval_ms = std::max(1, 1000 / std::max(1, params.fps));
+  auto next_send_at = std::chrono::steady_clock::now();
+  uint64_t last_frame_seq = 0;
   JpegFrameEncoder jpeg_encoder;
   std::string frame;
   std::string jpeg_frame;
@@ -606,13 +608,24 @@ bool stream_mjpeg(int fd, const CaptureParams &params,
       std::this_thread::sleep_for(20ms);
       continue;
     }
-    const PixelFormat fmt = session->capture->pixel_format();
-    if ((fmt != PixelFormat::MJPEG && fmt != PixelFormat::YUYV &&
-         fmt != PixelFormat::NV12) ||
-        !session->capture->latest_frame(frame)) {
-      std::this_thread::sleep_for(10ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_send_at) {
+      std::this_thread::sleep_for(
+          std::min<std::chrono::steady_clock::duration>(
+              next_send_at - now, std::chrono::milliseconds(5)));
       continue;
     }
+    const PixelFormat fmt = session->capture->pixel_format();
+    const uint64_t frame_seq_before =
+        session->capture->latest_frame_sequence();
+    if ((fmt != PixelFormat::MJPEG && fmt != PixelFormat::YUYV &&
+         fmt != PixelFormat::NV12) ||
+        frame_seq_before == 0 || frame_seq_before == last_frame_seq ||
+        !session->capture->latest_frame(frame)) {
+      std::this_thread::sleep_for(2ms);
+      continue;
+    }
+    const uint64_t frame_seq_after = session->capture->latest_frame_sequence();
     if (!jpeg_encoder.encode(fmt, frame, params.width, params.height,
                              params.quality, jpeg_frame)) {
       std::this_thread::sleep_for(5ms);
@@ -621,8 +634,10 @@ bool stream_mjpeg(int fd, const CaptureParams &params,
     if (!send_ws_binary_frame(fd, jpeg_frame)) {
       return false;
     }
+    last_frame_seq = std::max(frame_seq_before, frame_seq_after);
+    next_send_at = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(frame_interval_ms);
     stream::note_frame_sent(*session, jpeg_frame.size());
-    std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
   }
 }
 
@@ -729,6 +744,8 @@ bool stream_raw(int fd, const CaptureParams &params,
   const int y_size = width * height;
   const int uv_size = (width / 2) * (height / 2);
   const int frame_interval_ms = std::max(1, 1000 / std::max(1, params.fps));
+  auto next_send_at = std::chrono::steady_clock::now();
+  uint64_t last_frame_seq = 0;
 
   std::string frame;
   std::string i420(y_size + (2 * uv_size), '\0');
@@ -742,10 +759,21 @@ bool stream_raw(int fd, const CaptureParams &params,
       std::this_thread::sleep_for(20ms);
       continue;
     }
-    if (!session->capture->latest_frame(frame)) {
-      std::this_thread::sleep_for(10ms);
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_send_at) {
+      std::this_thread::sleep_for(
+          std::min<std::chrono::steady_clock::duration>(
+              next_send_at - now, std::chrono::milliseconds(5)));
       continue;
     }
+    const uint64_t frame_seq_before =
+        session->capture->latest_frame_sequence();
+    if (frame_seq_before == 0 || frame_seq_before == last_frame_seq ||
+        !session->capture->latest_frame(frame)) {
+      std::this_thread::sleep_for(2ms);
+      continue;
+    }
+    const uint64_t frame_seq_after = session->capture->latest_frame_sequence();
 
     const PixelFormat fmt = session->capture->pixel_format();
     if (fmt != PixelFormat::YUYV && fmt != PixelFormat::NV12) {
@@ -772,8 +800,10 @@ bool stream_raw(int fd, const CaptureParams &params,
     if (!send_ws_binary_frame(fd, payload)) {
       return false;
     }
+    last_frame_seq = std::max(frame_seq_before, frame_seq_after);
+    next_send_at = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(frame_interval_ms);
     stream::note_frame_sent(*session, payload.size());
-    std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
   }
 }
 
@@ -1011,6 +1041,22 @@ void WebSocketServer::handle_client(int client_fd) {
 
   auto session = sessions_.get_or_create(device_id, params);
   if (!stream::session_can_serve_request(device_id, *session, params)) {
+    CaptureParams upgraded_source;
+    if (stream::session_can_upgrade_source_for_request(
+            device_id, *session, params, upgraded_source)) {
+      if (!stream::reconfigure_session_source(device_id, session,
+                                             upgraded_source)) {
+        send_http_json(
+            client_fd, 503,
+            stream::build_error_json(
+                "device_unavailable",
+                "failed to reconfigure camera for higher fps"));
+        close(client_fd);
+        return;
+      }
+    }
+  }
+  if (!stream::session_can_serve_request(device_id, *session, params)) {
     send_http_json(client_fd, 409,
                    stream::build_error_json("conflict",
                                             "params locked by first requester"));
@@ -1035,36 +1081,13 @@ void WebSocketServer::handle_client(int client_fd) {
     attached = false;
   };
 
-  {
-    std::lock_guard<std::mutex> lifecycle_lock(session->lifecycle_mu);
-    if (!session->capture->running()) {
-      session->state.store(SessionState::Warming);
-      const auto warming_started_at = std::chrono::steady_clock::now();
-      if (!session->capture->start(device_id, session->params)) {
-        send_http_json(client_fd, 503,
-                       stream::build_error_json("device_unavailable",
-                                                "failed to open camera"));
-        session->state.store(SessionState::Idle);
-        session->teardown_reason.store(TeardownReason::OpenFailed);
-        detach_client();
-        close(client_fd);
-        return;
-      }
-      stream::sync_session_params(*session);
-      session->started = std::chrono::steady_clock::now();
-      session->frames_sent.store(0);
-      session->bytes_sent.store(0);
-      session->startup_ms.store(static_cast<uint64_t>(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              session->started - warming_started_at)
-              .count()));
-      session->first_frame_ms.store(0);
-      session->first_frame_marked.store(false);
-      session->first_iframe_ms.store(0);
-      session->first_iframe_marked.store(false);
-      session->state.store(SessionState::Live);
-      session->teardown_reason.store(TeardownReason::None);
-    }
+  if (!stream::ensure_session_running(device_id, session)) {
+    send_http_json(client_fd, 503,
+                   stream::build_error_json("device_unavailable",
+                                            "failed to open camera"));
+    detach_client();
+    close(client_fd);
+    return;
   }
 
   const CaptureParams effective_output =

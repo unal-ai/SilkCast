@@ -414,6 +414,7 @@ bool CaptureV4L2::start(const std::string &device_id,
     }
 
     pixel_format_ = want_mjpeg ? PixelFormat::MJPEG : PixelFormat::NV12;
+    frame_sequence_.store(0, std::memory_order_relaxed);
     running_ = true;
     return true;
   }
@@ -435,6 +436,7 @@ void CaptureV4L2::stop() {
   }
   std::lock_guard<std::mutex> lock(buf_mu_);
   buffer_.clear();
+  frame_sequence_.store(0, std::memory_order_relaxed);
 }
 
 bool CaptureV4L2::latest_frame(std::string &out) {
@@ -481,6 +483,7 @@ void CaptureV4L2::handle_sample(void *sample_buffer) {
           buffer_.assign(reinterpret_cast<const char *>(data.bytes),
                          data.length);
         }
+        frame_sequence_.fetch_add(1, std::memory_order_relaxed);
         CGImageRelease(cg_image);
       }
     } else {
@@ -512,6 +515,7 @@ void CaptureV4L2::handle_sample(void *sample_buffer) {
       }
       std::lock_guard<std::mutex> lock(buf_mu_);
       buffer_ = std::move(local);
+      frame_sequence_.fetch_add(1, std::memory_order_relaxed);
     }
 
     CVPixelBufferUnlockBaseAddress(image_buffer, kCVPixelBufferLock_ReadOnly);

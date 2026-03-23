@@ -51,6 +51,7 @@ bool CaptureRTSP::start(const std::string &url, const CaptureParams &params) {
   url_ = url;
   params_ = params;
   stop_flag_ = false;
+  frame_sequence_.store(0, std::memory_order_relaxed);
   running_ = true;
   thread_ = std::thread([this] { loop(); });
 
@@ -72,6 +73,7 @@ void CaptureRTSP::stop() {
   }
   if (thread_.joinable()) thread_.join();
   running_ = false;
+  frame_sequence_.store(0, std::memory_order_relaxed);
 }
 
 bool CaptureRTSP::latest_frame(std::string &out) {
@@ -417,6 +419,7 @@ void CaptureRTSP::loop() {
         std::lock_guard<std::mutex> lock(buf_mu_);
         buffer_ = nalu;
       }
+      frame_sequence_.fetch_add(1, std::memory_order_relaxed);
 
       // Try extracting SPS/PPS from in-band stream.
       size_t pos = 0;

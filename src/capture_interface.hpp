@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@ public:
                      const CaptureParams &params) = 0;
   virtual void stop() = 0;
   virtual bool latest_frame(std::string &out) = 0;
+  virtual uint64_t latest_frame_sequence() const = 0;
   virtual bool running() const = 0;
   virtual int width() const = 0;
   virtual int height() const = 0;

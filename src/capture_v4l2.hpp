@@ -20,6 +20,9 @@ public:
   void stop() override;
   bool running() const override { return running_; }
   bool latest_frame(std::string &out) override;
+  uint64_t latest_frame_sequence() const override {
+    return frame_sequence_.load(std::memory_order_relaxed);
+  }
   PixelFormat pixel_format() const override { return pixel_format_; }
   int width() const override { return params_.width; }
   int height() const override { return params_.height; }
@@ -44,6 +47,7 @@ private:
   int fd_ = -1;
   std::atomic<bool> stop_flag_{false};
   std::atomic<bool> running_{false};
+  std::atomic<uint64_t> frame_sequence_{0};
   std::thread thread_;
   std::string buffer_; // latest frame
   std::mutex buf_mu_;
@@ -70,6 +74,9 @@ public:
   void stop() override;
   bool running() const override { return running_; }
   bool latest_frame(std::string &out) override;
+  uint64_t latest_frame_sequence() const override {
+    return frame_sequence_.load(std::memory_order_relaxed);
+  }
   PixelFormat pixel_format() const override { return pixel_format_; }
   int width() const override { return params_.width; }
   int height() const override { return params_.height; }
@@ -89,6 +96,7 @@ private:
   CaptureParams params_;
   PixelFormat pixel_format_ = PixelFormat::UNKNOWN;
   std::atomic<bool> running_{false};
+  std::atomic<uint64_t> frame_sequence_{0};
   std::string buffer_;
   std::mutex buf_mu_;
 };
@@ -102,6 +110,7 @@ public:
   void stop() override {}
   bool running() const override { return false; }
   bool latest_frame(std::string &) override { return false; }
+  uint64_t latest_frame_sequence() const override { return 0; }
   PixelFormat pixel_format() const override { return PixelFormat::UNKNOWN; }
   int width() const override { return 0; }
   int height() const override { return 0; }

@@ -16,6 +16,9 @@ public:
   bool start(const std::string &url, const CaptureParams &params) override;
   void stop() override;
   bool latest_frame(std::string &out) override;
+  uint64_t latest_frame_sequence() const override {
+    return frame_sequence_.load(std::memory_order_relaxed);
+  }
   bool running() const override { return running_; }
   int width() const override { return params_.width; }
   int height() const override { return params_.height; }
@@ -42,6 +45,7 @@ private:
   CaptureParams params_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_flag_{false};
+  std::atomic<uint64_t> frame_sequence_{0};
   std::thread thread_;
 
   mutable std::mutex buf_mu_;

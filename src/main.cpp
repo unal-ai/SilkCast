@@ -591,6 +591,21 @@ int main(int argc, char *argv[]) {
 
          auto session = sessions.get_or_create(device_id, params);
          if (!stream::session_can_serve_request(device_id, *session, params)) {
+           CaptureParams upgraded_source;
+           if (stream::session_can_upgrade_source_for_request(
+                   device_id, *session, params, upgraded_source)) {
+             if (!stream::reconfigure_session_source(device_id, session,
+                                                    upgraded_source)) {
+               res.status = 503;
+               res.set_content(stream::build_error_json(
+                                   "device_unavailable",
+                                   "failed to reconfigure camera for higher fps"),
+                               "application/json");
+               return;
+             }
+           }
+         }
+         if (!stream::session_can_serve_request(device_id, *session, params)) {
            res.status = 409;
            res.set_content(
                stream::build_error_json("conflict",
@@ -615,36 +630,13 @@ int main(int argc, char *argv[]) {
            detach_client();
          };
 
-         {
-           std::lock_guard<std::mutex> lifecycle_lock(session->lifecycle_mu);
-           if (!session->capture->running()) {
-             session->state.store(SessionState::Warming);
-             const auto warming_started_at = std::chrono::steady_clock::now();
-             if (!session->capture->start(device_id, session->params)) {
-               res.status = 503;
-               res.set_content(stream::build_error_json("device_unavailable",
-                                                        "failed to open camera"),
-                               "application/json");
-               session->state.store(SessionState::Idle);
-               session->teardown_reason.store(TeardownReason::OpenFailed);
-               detach_client();
-               return;
-             }
-             stream::sync_session_params(*session);
-             session->started = std::chrono::steady_clock::now();
-             session->frames_sent = 0;
-             session->bytes_sent = 0;
-             session->startup_ms.store(static_cast<uint64_t>(
-                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                     session->started - warming_started_at)
-                     .count()));
-             session->first_frame_ms.store(0);
-             session->first_frame_marked.store(false);
-             session->first_iframe_ms.store(0);
-             session->first_iframe_marked.store(false);
-             session->state.store(SessionState::Live);
-             session->teardown_reason.store(TeardownReason::None);
-           }
+         if (!stream::ensure_session_running(device_id, session)) {
+           res.status = 503;
+           res.set_content(stream::build_error_json("device_unavailable",
+                                                    "failed to open camera"),
+                           "application/json");
+           detach_client();
+           return;
          }
 
          CaptureParams effective_output =

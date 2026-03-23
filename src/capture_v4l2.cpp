@@ -268,6 +268,7 @@ bool CaptureV4L2::start(const std::string &device_id,
     return true;
   device_id_ = device_id;
   params_ = params;
+  frame_sequence_.store(0, std::memory_order_relaxed);
 
   std::string dev_path =
       device_id_.rfind("/dev/", 0) == 0 ? device_id_ : "/dev/" + device_id_;
@@ -306,6 +307,7 @@ void CaptureV4L2::stop() {
     fd_ = -1;
   }
   running_ = false;
+  frame_sequence_.store(0, std::memory_order_relaxed);
 }
 
 bool CaptureV4L2::latest_frame(std::string &out) {
@@ -361,6 +363,7 @@ void CaptureV4L2::loop_mmap() {
       buffer_.assign(static_cast<char *>(buffers_[buf.index].start),
                      buf.bytesused);
     }
+    frame_sequence_.fetch_add(1, std::memory_order_relaxed);
 
     // Requeue buffer
     if (!xioctl(fd_, VIDIOC_QBUF, &buf)) {
@@ -392,6 +395,7 @@ void CaptureV4L2::loop_read() {
       std::lock_guard<std::mutex> lock(buf_mu_);
       buffer_.assign(local.data(), n);
     }
+    frame_sequence_.fetch_add(1, std::memory_order_relaxed);
   }
 }
 

@@ -36,6 +36,15 @@ CaptureParams normalize_source_params(const std::string &device_id,
 bool session_can_serve_request(const std::string &device_id,
                                const Session &session,
                                const CaptureParams &requested);
+bool session_can_upgrade_source_for_request(const std::string &device_id,
+                                            const Session &session,
+                                            const CaptureParams &requested,
+                                            CaptureParams &upgraded_source);
+bool reconfigure_session_source(const std::string &device_id,
+                                std::shared_ptr<Session> session,
+                                const CaptureParams &source_params);
+bool ensure_session_running(const std::string &device_id,
+                            std::shared_ptr<Session> session);
 CaptureParams derive_effective_output_params(const Session &session,
                                              const CaptureParams &requested);
 void sync_session_params(Session &session);
