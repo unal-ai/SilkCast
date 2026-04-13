@@ -29,6 +29,32 @@ bool same_source_params(const CaptureParams &a, const CaptureParams &b) {
   return true;
 }
 
+std::string normalize_local_device_path(const std::string &device_id) {
+  if (device_id.rfind("rtsp://", 0) == 0) {
+    return device_id;
+  }
+  if (device_id.rfind("/dev/", 0) == 0) {
+    return device_id;
+  }
+  if (device_id.rfind("video", 0) == 0) {
+    return "/dev/" + device_id;
+  }
+  return device_id;
+}
+
+std::string canonical_session_key(const std::string &device_id) {
+  const auto normalized = normalize_local_device_path(device_id);
+  if (normalized.rfind("/dev/", 0) != 0) {
+    return normalized;
+  }
+  std::error_code ec;
+  const auto canonical = std::filesystem::canonical(normalized, ec);
+  if (!ec) {
+    return canonical.string();
+  }
+  return normalized;
+}
+
 std::shared_ptr<Session> make_session(const std::string &device_id,
                                       const CaptureParams &params) {
   auto session = std::make_shared<Session>();
@@ -58,31 +84,37 @@ std::shared_ptr<Session>
 SessionManager::get_or_create(const std::string &device_id,
                               const CaptureParams &params) {
   std::lock_guard<std::mutex> lock(mu_);
+  const auto session_key = canonical_session_key(device_id);
   const CaptureParams source_params =
       stream::normalize_source_params(device_id, params);
-  auto it = sessions_.find(device_id);
+  auto it = sessions_.find(session_key);
   if (it != sessions_.end()) {
     auto &existing = it->second;
-    if (!same_source_params(existing->params, source_params) &&
-        existing->client_count.load() == 0) {
+    const bool no_clients = existing->client_count.load() == 0;
+    const bool stale_capture =
+        !existing->capture || !existing->capture->running();
+    if ((!same_source_params(existing->params, source_params) || stale_capture) &&
+        no_clients) {
       if (existing->capture) {
         existing->capture->stop();
       }
       existing->state.store(SessionState::Idle);
-      existing->teardown_reason.store(TeardownReason::IdleTimeout);
-      it->second = make_session(device_id, source_params);
+      existing->teardown_reason.store(
+          stale_capture ? TeardownReason::OpenFailed
+                        : TeardownReason::IdleTimeout);
+      it->second = make_session(session_key, source_params);
       return it->second;
     }
     return it->second;
   }
-  auto session = make_session(device_id, source_params);
-  sessions_[device_id] = session;
+  auto session = make_session(session_key, source_params);
+  sessions_[session_key] = session;
   return session;
 }
 
 void SessionManager::touch(const std::string &device_id) {
   std::lock_guard<std::mutex> lock(mu_);
-  auto it = sessions_.find(device_id);
+  auto it = sessions_.find(canonical_session_key(device_id));
   if (it != sessions_.end()) {
     it->second->last_accessed = std::chrono::steady_clock::now();
   }
@@ -90,7 +122,7 @@ void SessionManager::touch(const std::string &device_id) {
 
 void SessionManager::release_if_idle(const std::string &device_id) {
   std::lock_guard<std::mutex> lock(mu_);
-  auto it = sessions_.find(device_id);
+  auto it = sessions_.find(canonical_session_key(device_id));
   if (it != sessions_.end()) {
     if (it->second->client_count.load() == 0) {
       if (it->second->capture && it->second->capture->running()) {
@@ -140,7 +172,7 @@ std::vector<std::string> SessionManager::list_devices() const {
 std::optional<std::shared_ptr<Session>>
 SessionManager::find(const std::string &device_id) {
   std::lock_guard<std::mutex> lock(mu_);
-  auto it = sessions_.find(device_id);
+  auto it = sessions_.find(canonical_session_key(device_id));
   if (it == sessions_.end())
     return std::nullopt;
   return it->second;

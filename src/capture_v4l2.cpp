@@ -266,6 +266,10 @@ bool CaptureV4L2::start(const std::string &device_id,
                         const CaptureParams &params) {
   if (running_)
     return true;
+  if (fd_ >= 0 || thread_.joinable() || num_buffers_ > 0) {
+    std::cerr << "CaptureV4L2::start cleaning stale resources before reopen\n";
+    stop();
+  }
   device_id_ = device_id;
   params_ = params;
   frame_sequence_.store(0, std::memory_order_relaxed);

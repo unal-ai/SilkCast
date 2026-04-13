@@ -248,6 +248,11 @@ Entries:
   - **Why:** The previous exact-FPS lock broke the intended model where one raw source session feeds multiple consumers with different pacing, such as browser preview at `15 FPS` and inference at `10 FPS`.
   - **Impact:** A device already serving `mjpeg@15` from a raw-backed source can now also serve `raw@10` on the same live session, and the second client sees `Effective-Params ... fps=10` / `X-SilkCast-Fps: 10` instead of a `409 conflict`.
   - **Rollback:** Revert `src/stream_utils.cpp` and this `AGENTS.md` entry.
+- `[2026-04-13] [Codex] [Canonical Device Session Keys]`
+  - **What changed:** Normalized local V4L2 device ids in `src/session_manager.cpp` so equivalent references like `video6`, `/dev/video6`, and `/dev/v4l/by-id/...` map to one canonical session key before `get_or_create`, `find`, `touch`, and `release_if_idle`.
+  - **Why:** Observer had started using stable `/dev/v4l/by-id/...` camera refs while other clients still requested `videoN`; SilkCast treated them as different sessions and violated the project rule that equivalent GETs must share one lazy session.
+  - **Impact:** Concurrent web clients now reuse the same underlying capture session across `videoN` and `by-id` paths instead of reopening the hardware and hitting `503 {"error":"device_unavailable","details":"failed to open camera"}` with `VIDIOC_S_FMT errno=16`.
+  - **Rollback:** Revert `src/session_manager.cpp` to the previous revision and restart SilkCast.
 
 *(New agents: append entries; do not rewrite history.)*
 
