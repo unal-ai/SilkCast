@@ -629,38 +629,34 @@ bool session_can_serve_request(const std::string &device_id,
   const CaptureParams requested_source =
       normalize_source_params(device_id, requested);
   const CaptureParams &active_source = session.params;
-  const bool auto_mjpeg_can_reuse_raw_source =
-      requested.source_codec.empty() && requested.codec == "mjpeg" &&
-      active_source.codec == "raw";
-  const bool fps_compatible =
-      requested_source.fps == active_source.fps ||
-      (active_source.codec == "raw" && requested_source.fps > 0 &&
-       requested_source.fps <= active_source.fps);
-  const bool same_source =
-      requested_source.width == active_source.width &&
-      requested_source.height == active_source.height &&
-      fps_compatible &&
-      requested_source.media == active_source.media &&
-      (requested_source.codec == active_source.codec ||
-       auto_mjpeg_can_reuse_raw_source) &&
-      (requested_source.codec != "mjpeg" ||
-       auto_mjpeg_can_reuse_raw_source ||
-       requested_source.quality == active_source.quality);
-  if (!same_source) {
+  if (requested_source.media != active_source.media) {
     return false;
   }
   if (device_id.rfind("rtsp://", 0) == 0) {
     return requested.codec == "h264";
   }
+
+  // A raw-backed capture keeps the latest original frames in memory. Different
+  // clients may request their own output codec/fps/quality without owning or
+  // reconfiguring the physical camera. The response advertises the effective
+  // dimensions/fps derived from the active source.
   if (active_source.codec == "raw") {
     return requested.codec == "raw" || requested.codec == "h264" ||
            requested.codec == "mjpeg";
   }
+
+  const bool fps_compatible =
+      requested_source.fps == active_source.fps ||
+      (requested_source.fps > 0 && requested_source.fps <= active_source.fps);
+  const bool same_source_shape =
+      requested_source.media == active_source.media &&
+      requested_source.width == active_source.width &&
+      requested_source.height == active_source.height && fps_compatible;
   if (active_source.codec == "mjpeg") {
-    return requested.codec == "mjpeg";
+    return requested.codec == "mjpeg" && same_source_shape;
   }
   if (active_source.codec == "h264") {
-    return requested.codec == "h264";
+    return requested.codec == "h264" && same_source_shape;
   }
   return false;
 }
